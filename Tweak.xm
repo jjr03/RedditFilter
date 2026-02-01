@@ -7,7 +7,10 @@
 #import <mach-o/dyld.h>
 #import <objc/runtime.h>
 #import "Preferences.h"
-#import "FeedFilterSettingsViewController.h"
+
+// Forward declaration for FeedFilterSettingsViewController
+@interface FeedFilterSettingsViewController : UIViewController
+@end
 
 @interface CUICatalog : NSObject {
   NSBundle *_bundle;
@@ -219,7 +222,6 @@ static void filterNode(NSMutableDictionary *node) {
 // MARK: - 3-FINGER GESTURE IMPLEMENTATION
 // ============================================================================
 
-// Hook into UIWindow to add global 3-finger long press gesture
 %hook UIWindow
 
 - (void)becomeKeyWindow {
@@ -233,24 +235,18 @@ static void filterNode(NSMutableDictionary *node) {
             initWithTarget:self
             action:@selector(redditFilter_handleThreeFingerPress:)];
         
-        // Configure for 3 fingers
         threeFingerGesture.numberOfTouchesRequired = 3;
-        
-        // Require 0.5 second hold
         threeFingerGesture.minimumPressDuration = 0.5;
-        
-        // Set delegate to handle conflicts
         threeFingerGesture.delegate = (id<UIGestureRecognizerDelegate>)self;
         
         [self addGestureRecognizer:threeFingerGesture];
         
-        NSLog(@"[RedditFilter] 3-finger gesture installed - hold 3 fingers for 0.5s to open settings");
+        NSLog(@"[RedditFilter] 3-finger gesture installed successfully");
     });
 }
 
 %new
 - (void)redditFilter_handleThreeFingerPress:(UILongPressGestureRecognizer *)gesture {
-    // Only trigger when gesture begins (not during or after)
     if (gesture.state == UIGestureRecognizerStateBegan) {
         NSLog(@"[RedditFilter] 3-finger long press detected - opening filter settings");
         
@@ -258,22 +254,25 @@ static void filterNode(NSMutableDictionary *node) {
         UIViewController *rootVC = self.rootViewController;
         UIViewController *topVC = rootVC;
         
-        // Navigate to the topmost presented view controller
         while (topVC.presentedViewController) {
             topVC = topVC.presentedViewController;
         }
         
-        // If we're in a navigation controller, use that
         if ([topVC isKindOfClass:[UINavigationController class]]) {
             topVC = [(UINavigationController *)topVC topViewController];
         }
         
-        // Create the filter settings view controller
-        FeedFilterSettingsViewController *filterVC = [[FeedFilterSettingsViewController alloc] init];
+        // Get FeedFilterSettingsViewController class dynamically
+        Class filterVCClass = NSClassFromString(@"FeedFilterSettingsViewController");
+        if (!filterVCClass) {
+            NSLog(@"[RedditFilter] ERROR: FeedFilterSettingsViewController class not found");
+            return;
+        }
+        
+        UIViewController *filterVC = [[filterVCClass alloc] init];
         UINavigationController *navController = [[UINavigationController alloc]
             initWithRootViewController:filterVC];
         
-        // Present the settings
         [topVC presentViewController:navController animated:YES completion:^{
             NSLog(@"[RedditFilter] Filter settings presented successfully");
         }];
@@ -284,8 +283,6 @@ static void filterNode(NSMutableDictionary *node) {
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
     shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     
-    // Don't allow simultaneous recognition for our 3-finger gesture
-    // to avoid conflicts with other gestures
     if ([gestureRecognizer isKindOfClass:[UILongPressGestureRecognizer class]]) {
         UILongPressGestureRecognizer *longPress = (UILongPressGestureRecognizer *)gestureRecognizer;
         if (longPress.numberOfTouchesRequired == 3) {
@@ -299,10 +296,9 @@ static void filterNode(NSMutableDictionary *node) {
 %end
 
 // ============================================================================
-// MARK: - LEGACY HOOKS (Preserved from original)
+// MARK: - LEGACY HOOKS
 // ============================================================================
 
-// Only necessary for older app versions
 %group Legacy
 
 %hook Listing
