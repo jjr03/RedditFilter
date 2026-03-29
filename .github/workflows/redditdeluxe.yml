@@ -132,9 +132,11 @@ jobs:
             cp -r "$FRAMEWORK_SRC" "$APP_DIR/Frameworks/CydiaSubstrate.framework"
           fi
 
-          # Use ivinject to register each dylib as a load command in the binary
-          BINARY="$APP_DIR/$(defaults read "$(pwd)/$APP_DIR/Info" CFBundleExecutable 2>/dev/null || \
-            /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$(pwd)/$APP_DIR/Info.plist")"
+          # Read the main binary name using xmlstarlet (Linux compatible)
+          BINARY_NAME=$(xmlstarlet sel -t -v \
+            "/plist/dict/key[text()='CFBundleExecutable']/following-sibling::*[1]/text()" \
+            "$(pwd)/$APP_DIR/Info.plist")
+          BINARY="$APP_DIR/$BINARY_NAME"
           echo "Main binary: $BINARY"
 
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
