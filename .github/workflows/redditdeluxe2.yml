@@ -1,4 +1,4 @@
-name: RedditDeluxe2
+name: RedditDeluxe
 
 on:
   push:
@@ -34,23 +34,50 @@ jobs:
           echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
           echo "version=$version" >> $GITHUB_OUTPUT
 
-      - name: 🧰 Install base dependencies
+      - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip make clang
+          sudo apt install -y rsync xmlstarlet unzip zip make clang git
 
-      - name: 🧪 Install theos-jailed dependencies
+      - name: 🛠 Setup Theos
+        uses: level3tjg/theos-action@main
+        with:
+          cache: true
+          cache-dir-theos: ${{ github.workspace }}/theos
+          cache-dir-sdks: ${{ github.workspace }}/theos/sdks
+
+      # 🔥 CRITICAL FIX: ensure ivinject exists EVEN if vendor is missing
+      - name: 🔧 Ensure ivinject exists (clone if missing)
+        run: |
+          THEOS_DIR="${{ github.workspace }}/theos"
+          IV_DIR="$THEOS_DIR/vendor/ivinject"
+
+          echo "Checking ivinject..."
+
+          if [ ! -d "$IV_DIR" ]; then
+            echo "ivinject missing → cloning manually"
+            mkdir -p "$THEOS_DIR/vendor"
+            git clone https://github.com/ichitaso/ivinject.git "$IV_DIR"
+          fi
+
+          cd "$IV_DIR"
+          make
+          chmod +x ivinject
+
+          echo "✅ ivinject ready:"
+          ls -la
+
+      - name: 📥 Checkout theos-jailed
         if: ${{ inputs.create_release }}
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin llvm
+        uses: actions/checkout@v4
+        with:
+          repository: level3tjg/theos-jailed
+          path: theos-jailed
+          submodules: recursive
 
-          curl -L https://github.com/libimobiledevice/libplist/releases/download/2.6.0/libplist-2.6.0.tar.bz2 | bzip2 -d | tar -x
-          cd libplist*
-          ./configure
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
+      - name: ⚙️ Install theos-jailed
+        if: ${{ inputs.create_release }}
+        run: ./theos-jailed/install
 
       - name: 📥 Download IPA (Auto)
         if: ${{ inputs.create_release && !inputs.ipa_url }}
@@ -75,44 +102,7 @@ jobs:
           echo "bundle-id=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleIdentifier']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
           echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
 
-      - name: 🛠 Setup Theos
-        uses: level3tjg/theos-action@main
-        with:
-          cache: true
-          cache-dir-theos: ${{ github.workspace }}/theos
-          cache-dir-sdks: ${{ github.workspace }}/theos/sdks
-
-      # 🔥 FIX: Ensure ivinject exists and is built
-      - name: 🔧 Build ivinject (fix missing binary)
-        run: |
-          IV_DIR="${{ github.workspace }}/theos/vendor/ivinject"
-
-          if [ ! -d "$IV_DIR" ]; then
-            echo "ivinject directory missing!"
-            exit 1
-          fi
-
-          cd "$IV_DIR"
-          make
-          chmod +x ivinject
-
-          echo "ivinject built successfully:"
-          ls -la
-
-      - name: 📥 Checkout theos-jailed
-        if: ${{ inputs.create_release }}
-        uses: actions/checkout@v4
-        with:
-          repository: level3tjg/theos-jailed
-          path: theos-jailed
-          submodules: recursive
-
-      - name: ⚙️ Install theos-jailed
-        if: ${{ inputs.create_release }}
-        run: |
-          ./theos-jailed/install
-
-      - name: 📦 Build IPA (with tweaks)
+      - name: 📦 Build IPA
         if: ${{ inputs.create_release }}
         run: make package
         env:
@@ -121,17 +111,12 @@ jobs:
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: 💉 Inject extra dylibs into IPA
+      - name: 💉 Inject dylibs
         if: ${{ inputs.create_release }}
         run: |
           set -e
 
           IVINJECT="${{ github.workspace }}/theos/vendor/ivinject/ivinject"
-
-          if [ ! -f "$IVINJECT" ]; then
-            echo "❌ ivinject not found!"
-            exit 1
-          fi
 
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
           echo "Injecting into: $IPA_PATH"
@@ -142,69 +127,19 @@ jobs:
           unzip -q App.ipa
 
           APP_DIR=$(ls -d Payload/*.app | head -n 1)
-          echo "App bundle: $APP_DIR"
-
-          for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
-            name=$(basename "$dylib")
-            echo "Copying dylib: $name"
-            cp "$dylib" "$APP_DIR/$name"
-          done
-
-          FRAMEWORK_SRC="${{ github.workspace }}/.dylib/CydiaSubstrate.framework"
-          if [ -d "$FRAMEWORK_SRC" ]; then
-            echo "Copying CydiaSubstrate.framework"
-            mkdir -p "$APP_DIR/Frameworks"
-            cp -r "$FRAMEWORK_SRC" "$APP_DIR/Frameworks/CydiaSubstrate.framework"
-          fi
 
           BINARY_NAME=$(xmlstarlet sel -t -v \
             "/plist/dict/key[text()='CFBundleExecutable']/following-sibling::*[1]/text()" \
-            "$(pwd)/$APP_DIR/Info.plist")
+            "$APP_DIR/Info.plist")
 
           BINARY="$APP_DIR/$BINARY_NAME"
-          echo "Main binary: $BINARY"
 
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
             name=$(basename "$dylib")
-            echo "Injecting: $name"
+            cp "$dylib" "$APP_DIR/$name"
             "$IVINJECT" "$BINARY" "@executable_path/$name"
           done
 
-          echo "Injecting CydiaSubstrate"
-          "$IVINJECT" "$BINARY" \
-            "@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
-
-          rm App.ipa
           zip -qr App_deluxe.ipa Payload/
-
           mkdir -p ${{ github.workspace }}/packages
-          DELUXE_IPA="${{ github.workspace }}/packages/$(basename $IPA_PATH .ipa)_deluxe.ipa"
-
-          cp App_deluxe.ipa "$DELUXE_IPA"
-          rm "$IPA_PATH"
-
-          echo "✅ Final IPA: $DELUXE_IPA"
-
-      - name: 🔐 Hash release files
-        if: ${{ inputs.create_release }}
-        id: hash_files
-        run: |
-          echo 'hashes<<EOF' >> $GITHUB_OUTPUT
-          sha256sum packages/* >> $GITHUB_OUTPUT
-          echo 'EOF' >> $GITHUB_OUTPUT
-
-      - name: 📤 Upload artifacts
-        if: ${{ inputs.create_release }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}_deluxe
-          path: packages/*
-
-      - name: 🚀 Create release
-        if: ${{ inputs.create_release }}
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: packages/*
-          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}-deluxe
-          body: ${{ steps.hash_files.outputs.hashes }}
+          cp App_deluxe.ipa ${{ github.workspace }}/packages/
