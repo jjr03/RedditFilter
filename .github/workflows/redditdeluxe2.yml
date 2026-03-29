@@ -46,25 +46,24 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 CRITICAL FIX: ensure ivinject exists EVEN if vendor is missing
-      - name: 🔧 Ensure ivinject exists (clone if missing)
+      # 🔥 FIX: Safe ivinject setup
+      - name: 🔧 Ensure ivinject exists (public clone if missing)
         run: |
           THEOS_DIR="${{ github.workspace }}/theos"
           IV_DIR="$THEOS_DIR/vendor/ivinject"
 
           echo "Checking ivinject..."
-
           if [ ! -d "$IV_DIR" ]; then
-            echo "ivinject missing → cloning manually"
+            echo "ivinject missing → cloning public repo"
             mkdir -p "$THEOS_DIR/vendor"
-            git clone https://github.com/ichitaso/ivinject.git "$IV_DIR"
+            git clone --depth=1 https://github.com/ichitaso/ivinject.git "$IV_DIR" || \
+              { echo "❌ Failed to clone ivinject"; exit 1; }
           fi
 
           cd "$IV_DIR"
           make
           chmod +x ivinject
-
-          echo "✅ ivinject ready:"
+          echo "✅ ivinject ready"
           ls -la
 
       - name: 📥 Checkout theos-jailed
@@ -115,7 +114,6 @@ jobs:
         if: ${{ inputs.create_release }}
         run: |
           set -e
-
           IVINJECT="${{ github.workspace }}/theos/vendor/ivinject/ivinject"
 
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
