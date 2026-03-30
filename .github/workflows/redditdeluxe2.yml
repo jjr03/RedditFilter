@@ -24,20 +24,10 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: 📦 Get package info
-        id: package_info
-        run: |
-          version=$(grep "PACKAGE_VERSION =" Makefile | cut -d' ' -f3)
-          if [ -z "$version" ]; then
-            version=$(grep "Version:" control | cut -d' ' -f2)
-          fi
-          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          echo "version=$version" >> $GITHUB_OUTPUT
-
       - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip make clang curl file
+          sudo apt install -y rsync xmlstarlet unzip zip make clang curl jq file
 
       - name: 🛠 Setup Theos
         uses: level3tjg/theos-action@main
@@ -46,8 +36,8 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 FIXED PROPERLY
-      - name: 🔧 Install ivinject (robust download)
+      # 🔥 FINAL FIX: dynamic branch + safe download
+      - name: 🔧 Install ivinject (robust + branch-safe)
         run: |
           set -e
 
@@ -60,19 +50,21 @@ jobs:
             mkdir -p "$THEOS_DIR/vendor"
             cd "$THEOS_DIR/vendor"
 
+            echo "Fetching default branch from GitHub API..."
+
+            BRANCH=$(curl -s https://api.github.com/repos/ichitaso/ivinject | jq -r .default_branch)
+            echo "Default branch: $BRANCH"
+
             echo "Downloading ivinject..."
 
             curl -L \
               -H "User-Agent: GitHub-Actions" \
-              https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/master \
+              "https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/$BRANCH" \
               -o ivinject.tar.gz
 
-            echo "Checking archive..."
-            file ivinject.tar.gz
-
-            # Ensure it's valid gzip
+            echo "Validating archive..."
             if ! file ivinject.tar.gz | grep -q gzip; then
-              echo "❌ Download failed (not a gzip file)"
+              echo "❌ Invalid archive"
               cat ivinject.tar.gz
               exit 1
             fi
@@ -88,28 +80,6 @@ jobs:
           echo "✅ ivinject ready"
           ls -la
 
-      - name: 📥 Download IPA (Auto)
-        if: ${{ inputs.create_release && !inputs.ipa_url }}
-        uses: level3tjg/decryptedappstore-action@main
-        with:
-          appstore_url: "https://apps.apple.com/us/app/reddit/id1064216828"
-          cache: true
-          path: ${{ github.workspace }}/App.ipa
-          token: ${{ secrets.DECRYPTEDAPPSTORE_SESSION_TOKEN }}
-
-      - name: 📥 Download IPA (Manual)
-        if: ${{ inputs.create_release && inputs.ipa_url }}
-        run: |
-          curl -Lo "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
-          zip -T "${{ github.workspace }}/App.ipa"
-
-      - name: 📊 Get IPA Info
-        if: ${{ inputs.create_release }}
-        id: ipa_info
-        run: |
-          info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
-
       - name: 📦 Build IPA
         if: ${{ inputs.create_release }}
         run: make package
@@ -117,7 +87,6 @@ jobs:
           FINALPACKAGE: 1
           SIDELOADED: 1
           IPA: ${{ github.workspace }}/App.ipa
-          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
       - name: 💉 Inject dylibs
         if: ${{ inputs.create_release }}
