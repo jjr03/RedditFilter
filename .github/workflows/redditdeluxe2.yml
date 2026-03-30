@@ -27,7 +27,7 @@ jobs:
       - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip make clang curl file
+          sudo apt install -y rsync xmlstarlet unzip zip clang curl
 
       - name: 🛠 Setup Theos
         uses: level3tjg/theos-action@main
@@ -36,48 +36,45 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 FINAL FIX (no API, fallback strategy)
-      - name: 🔧 Install ivinject (stable download)
+      # 🔥 NEW: install insert_dylib (no git, no build issues)
+      - name: 🔧 Install insert_dylib
         run: |
           set -e
 
-          THEOS_DIR="${{ github.workspace }}/theos"
-          IV_DIR="$THEOS_DIR/vendor/ivinject"
+          mkdir -p tools
+          cd tools
 
-          echo "Setting up ivinject..."
+          echo "Downloading insert_dylib..."
 
-          if [ ! -d "$IV_DIR" ]; then
-            mkdir -p "$THEOS_DIR/vendor"
-            cd "$THEOS_DIR/vendor"
+          curl -L https://github.com/tyilo/insert_dylib/releases/latest/download/insert_dylib \
+            -o insert_dylib
 
-            echo "Trying main branch..."
-            curl -L -H "User-Agent: GitHub-Actions" \
-              https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/main \
-              -o ivinject.tar.gz || true
+          chmod +x insert_dylib
 
-            if ! file ivinject.tar.gz | grep -q gzip; then
-              echo "Main failed → trying master..."
-              curl -L -H "User-Agent: GitHub-Actions" \
-                https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/master \
-                -o ivinject.tar.gz
-            fi
-
-            if ! file ivinject.tar.gz | grep -q gzip; then
-              echo "❌ Failed to download ivinject"
-              cat ivinject.tar.gz
-              exit 1
-            fi
-
-            tar -xzf ivinject.tar.gz
-            mv ivinject-* ivinject
-          fi
-
-          cd "$IV_DIR"
-          make
-          chmod +x ivinject
-
-          echo "✅ ivinject ready"
+          echo "✅ insert_dylib ready"
           ls -la
+
+      - name: 📥 Download IPA (Auto)
+        if: ${{ inputs.create_release && !inputs.ipa_url }}
+        uses: level3tjg/decryptedappstore-action@main
+        with:
+          appstore_url: "https://apps.apple.com/us/app/reddit/id1064216828"
+          cache: true
+          path: ${{ github.workspace }}/App.ipa
+          token: ${{ secrets.DECRYPTEDAPPSTORE_SESSION_TOKEN }}
+
+      - name: 📥 Download IPA (Manual)
+        if: ${{ inputs.create_release && inputs.ipa_url }}
+        run: |
+          curl -Lo "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
+          zip -T "${{ github.workspace }}/App.ipa"
+
+      - name: 📊 Get IPA Info
+        if: ${{ inputs.create_release }}
+        id: ipa_info
+        run: |
+          info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
+          echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
 
       - name: 📦 Build IPA
         if: ${{ inputs.create_release }}
@@ -86,20 +83,17 @@ jobs:
           FINALPACKAGE: 1
           SIDELOADED: 1
           IPA: ${{ github.workspace }}/App.ipa
+          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: 💉 Inject dylibs
+      - name: 💉 Inject dylibs (using insert_dylib)
         if: ${{ inputs.create_release }}
         run: |
           set -e
 
-          IVINJECT="${{ github.workspace }}/theos/vendor/ivinject/ivinject"
-
-          if [ ! -f "$IVINJECT" ]; then
-            echo "❌ ivinject missing!"
-            exit 1
-          fi
+          INSERT="${{ github.workspace }}/tools/insert_dylib"
 
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
+          echo "Injecting into: $IPA_PATH"
 
           mkdir -p /tmp/ipa_work
           cp "$IPA_PATH" /tmp/ipa_work/App.ipa
@@ -113,12 +107,19 @@ jobs:
             "$APP_DIR/Info.plist")
 
           BINARY="$APP_DIR/$BINARY_NAME"
+          echo "Main binary: $BINARY"
 
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
             name=$(basename "$dylib")
             echo "Injecting $name"
+
             cp "$dylib" "$APP_DIR/$name"
-            "$IVINJECT" "$BINARY" "@executable_path/$name"
+
+            "$INSERT" \
+              --inplace \
+              --strip-codesig \
+              "@executable_path/$name" \
+              "$BINARY"
           done
 
           zip -qr App_deluxe.ipa Payload/
@@ -127,3 +128,10 @@ jobs:
           cp App_deluxe.ipa ${{ github.workspace }}/packages/
 
           echo "✅ Injection completed"
+
+      - name: 📤 Upload artifacts
+        if: ${{ inputs.create_release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: injected-ipa
+          path: packages/*
