@@ -27,7 +27,7 @@ jobs:
       - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip clang curl
+          sudo apt install -y rsync xmlstarlet unzip zip clang git make
 
       - name: 🛠 Setup Theos
         uses: level3tjg/theos-action@main
@@ -36,23 +36,24 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 NEW: install insert_dylib (no git, no build issues)
-      - name: 🔧 Install insert_dylib
+      # 🔥 FIX: build insert_dylib from source (no broken downloads)
+      - name: 🔧 Build insert_dylib
         run: |
           set -e
 
           mkdir -p tools
           cd tools
 
-          echo "Downloading insert_dylib..."
+          git clone https://github.com/tyilo/insert_dylib.git
+          cd insert_dylib
 
-          curl -L https://github.com/tyilo/insert_dylib/releases/latest/download/insert_dylib \
-            -o insert_dylib
+          make
 
           chmod +x insert_dylib
+          cp insert_dylib ../
 
-          echo "✅ insert_dylib ready"
-          ls -la
+          echo "✅ insert_dylib built"
+          ls -la ../
 
       - name: 📥 Download IPA (Auto)
         if: ${{ inputs.create_release && !inputs.ipa_url }}
@@ -85,12 +86,17 @@ jobs:
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: 💉 Inject dylibs (using insert_dylib)
+      - name: 💉 Inject dylibs
         if: ${{ inputs.create_release }}
         run: |
           set -e
 
           INSERT="${{ github.workspace }}/tools/insert_dylib"
+
+          if [ ! -f "$INSERT" ]; then
+            echo "❌ insert_dylib not found!"
+            exit 1
+          fi
 
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
           echo "Injecting into: $IPA_PATH"
