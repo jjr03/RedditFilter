@@ -105,6 +105,10 @@ jobs:
         run: |
           set -e
 
+          # Download insert_dylib (Linux binary)
+          curl -Lo /tmp/insert_dylib https://github.com/tyilo/insert_dylib/releases/download/1.0/insert_dylib-linux
+          chmod +x /tmp/insert_dylib
+
           # Find the built IPA
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
           echo "Injecting into: $IPA_PATH"
@@ -139,16 +143,18 @@ jobs:
           BINARY="$APP_DIR/$BINARY_NAME"
           echo "Main binary: $BINARY"
 
+          # Use insert_dylib to register each dylib as a load command
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
             name=$(basename "$dylib")
             echo "Injecting load command for: $name"
-            ${{ github.workspace }}/theos/vendor/ivinject/ivinject "$BINARY" "@executable_path/$name"
+            /tmp/insert_dylib --strip-codesig --inplace \
+              "@executable_path/$name" "$BINARY"
           done
 
           # Inject CydiaSubstrate.framework binary load command
           echo "Injecting load command for CydiaSubstrate.framework"
-          ${{ github.workspace }}/theos/vendor/ivinject/ivinject "$BINARY" \
-            "@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
+          /tmp/insert_dylib --strip-codesig --inplace \
+            "@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" "$BINARY"
 
           # Repack IPA
           rm App.ipa
