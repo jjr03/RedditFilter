@@ -37,7 +37,7 @@ jobs:
       - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip make clang git
+          sudo apt install -y rsync xmlstarlet unzip zip make clang curl
 
       - name: 🛠 Setup Theos
         uses: level3tjg/theos-action@main
@@ -46,23 +46,29 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 FIX: Safe ivinject setup
-      - name: 🔧 Ensure ivinject exists (public clone if missing)
+      # 🔥 FIXED: install ivinject WITHOUT git (no auth issues)
+      - name: 🔧 Install ivinject (tarball method)
         run: |
           THEOS_DIR="${{ github.workspace }}/theos"
           IV_DIR="$THEOS_DIR/vendor/ivinject"
 
-          echo "Checking ivinject..."
+          echo "Setting up ivinject..."
+
           if [ ! -d "$IV_DIR" ]; then
-            echo "ivinject missing → cloning public repo"
+            echo "ivinject missing → downloading tarball"
+
             mkdir -p "$THEOS_DIR/vendor"
-            git clone --depth=1 https://github.com/ichitaso/ivinject.git "$IV_DIR" || \
-              { echo "❌ Failed to clone ivinject"; exit 1; }
+            cd "$THEOS_DIR/vendor"
+
+            curl -L https://github.com/ichitaso/ivinject/archive/refs/heads/master.tar.gz -o ivinject.tar.gz
+            tar -xzf ivinject.tar.gz
+            mv ivinject-* ivinject
           fi
 
           cd "$IV_DIR"
           make
           chmod +x ivinject
+
           echo "✅ ivinject ready"
           ls -la
 
@@ -114,7 +120,13 @@ jobs:
         if: ${{ inputs.create_release }}
         run: |
           set -e
+
           IVINJECT="${{ github.workspace }}/theos/vendor/ivinject/ivinject"
+
+          if [ ! -f "$IVINJECT" ]; then
+            echo "❌ ivinject not found!"
+            exit 1
+          fi
 
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
           echo "Injecting into: $IPA_PATH"
@@ -131,13 +143,25 @@ jobs:
             "$APP_DIR/Info.plist")
 
           BINARY="$APP_DIR/$BINARY_NAME"
+          echo "Main binary: $BINARY"
 
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
             name=$(basename "$dylib")
+            echo "Injecting: $name"
             cp "$dylib" "$APP_DIR/$name"
             "$IVINJECT" "$BINARY" "@executable_path/$name"
           done
 
           zip -qr App_deluxe.ipa Payload/
+
           mkdir -p ${{ github.workspace }}/packages
           cp App_deluxe.ipa ${{ github.workspace }}/packages/
+
+          echo "✅ Injection completed"
+
+      - name: 📤 Upload artifacts
+        if: ${{ inputs.create_release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: injected-ipa
+          path: packages/*
