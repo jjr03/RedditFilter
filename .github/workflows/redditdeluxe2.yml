@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: 📥 Checkout repo (with submodules)
+      - name: 📥 Checkout repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -37,7 +37,7 @@ jobs:
       - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip make clang curl
+          sudo apt install -y rsync xmlstarlet unzip zip make clang curl file
 
       - name: 🛠 Setup Theos
         uses: level3tjg/theos-action@main
@@ -46,21 +46,37 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 FIXED: install ivinject WITHOUT git (no auth issues)
-      - name: 🔧 Install ivinject (tarball method)
+      # 🔥 FIXED PROPERLY
+      - name: 🔧 Install ivinject (robust download)
         run: |
+          set -e
+
           THEOS_DIR="${{ github.workspace }}/theos"
           IV_DIR="$THEOS_DIR/vendor/ivinject"
 
           echo "Setting up ivinject..."
 
           if [ ! -d "$IV_DIR" ]; then
-            echo "ivinject missing → downloading tarball"
-
             mkdir -p "$THEOS_DIR/vendor"
             cd "$THEOS_DIR/vendor"
 
-            curl -L https://github.com/ichitaso/ivinject/archive/refs/heads/master.tar.gz -o ivinject.tar.gz
+            echo "Downloading ivinject..."
+
+            curl -L \
+              -H "User-Agent: GitHub-Actions" \
+              https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/master \
+              -o ivinject.tar.gz
+
+            echo "Checking archive..."
+            file ivinject.tar.gz
+
+            # Ensure it's valid gzip
+            if ! file ivinject.tar.gz | grep -q gzip; then
+              echo "❌ Download failed (not a gzip file)"
+              cat ivinject.tar.gz
+              exit 1
+            fi
+
             tar -xzf ivinject.tar.gz
             mv ivinject-* ivinject
           fi
@@ -71,18 +87,6 @@ jobs:
 
           echo "✅ ivinject ready"
           ls -la
-
-      - name: 📥 Checkout theos-jailed
-        if: ${{ inputs.create_release }}
-        uses: actions/checkout@v4
-        with:
-          repository: level3tjg/theos-jailed
-          path: theos-jailed
-          submodules: recursive
-
-      - name: ⚙️ Install theos-jailed
-        if: ${{ inputs.create_release }}
-        run: ./theos-jailed/install
 
       - name: 📥 Download IPA (Auto)
         if: ${{ inputs.create_release && !inputs.ipa_url }}
@@ -104,7 +108,6 @@ jobs:
         id: ipa_info
         run: |
           info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "bundle-id=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleIdentifier']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
           echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
 
       - name: 📦 Build IPA
@@ -123,13 +126,7 @@ jobs:
 
           IVINJECT="${{ github.workspace }}/theos/vendor/ivinject/ivinject"
 
-          if [ ! -f "$IVINJECT" ]; then
-            echo "❌ ivinject not found!"
-            exit 1
-          fi
-
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
-          echo "Injecting into: $IPA_PATH"
 
           mkdir -p /tmp/ipa_work
           cp "$IPA_PATH" /tmp/ipa_work/App.ipa
@@ -143,11 +140,9 @@ jobs:
             "$APP_DIR/Info.plist")
 
           BINARY="$APP_DIR/$BINARY_NAME"
-          echo "Main binary: $BINARY"
 
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
             name=$(basename "$dylib")
-            echo "Injecting: $name"
             cp "$dylib" "$APP_DIR/$name"
             "$IVINJECT" "$BINARY" "@executable_path/$name"
           done
@@ -156,12 +151,3 @@ jobs:
 
           mkdir -p ${{ github.workspace }}/packages
           cp App_deluxe.ipa ${{ github.workspace }}/packages/
-
-          echo "✅ Injection completed"
-
-      - name: 📤 Upload artifacts
-        if: ${{ inputs.create_release }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: injected-ipa
-          path: packages/*
