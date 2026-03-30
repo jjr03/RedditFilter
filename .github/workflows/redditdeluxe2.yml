@@ -27,7 +27,7 @@ jobs:
       - name: 🧰 Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip make clang curl jq file
+          sudo apt install -y rsync xmlstarlet unzip zip make clang curl file
 
       - name: 🛠 Setup Theos
         uses: level3tjg/theos-action@main
@@ -36,8 +36,8 @@ jobs:
           cache-dir-theos: ${{ github.workspace }}/theos
           cache-dir-sdks: ${{ github.workspace }}/theos/sdks
 
-      # 🔥 FINAL FIX: dynamic branch + safe download
-      - name: 🔧 Install ivinject (robust + branch-safe)
+      # 🔥 FINAL FIX (no API, fallback strategy)
+      - name: 🔧 Install ivinject (stable download)
         run: |
           set -e
 
@@ -50,21 +50,20 @@ jobs:
             mkdir -p "$THEOS_DIR/vendor"
             cd "$THEOS_DIR/vendor"
 
-            echo "Fetching default branch from GitHub API..."
+            echo "Trying main branch..."
+            curl -L -H "User-Agent: GitHub-Actions" \
+              https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/main \
+              -o ivinject.tar.gz || true
 
-            BRANCH=$(curl -s https://api.github.com/repos/ichitaso/ivinject | jq -r .default_branch)
-            echo "Default branch: $BRANCH"
-
-            echo "Downloading ivinject..."
-
-            curl -L \
-              -H "User-Agent: GitHub-Actions" \
-              "https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/$BRANCH" \
-              -o ivinject.tar.gz
-
-            echo "Validating archive..."
             if ! file ivinject.tar.gz | grep -q gzip; then
-              echo "❌ Invalid archive"
+              echo "Main failed → trying master..."
+              curl -L -H "User-Agent: GitHub-Actions" \
+                https://codeload.github.com/ichitaso/ivinject/tar.gz/refs/heads/master \
+                -o ivinject.tar.gz
+            fi
+
+            if ! file ivinject.tar.gz | grep -q gzip; then
+              echo "❌ Failed to download ivinject"
               cat ivinject.tar.gz
               exit 1
             fi
@@ -95,6 +94,11 @@ jobs:
 
           IVINJECT="${{ github.workspace }}/theos/vendor/ivinject/ivinject"
 
+          if [ ! -f "$IVINJECT" ]; then
+            echo "❌ ivinject missing!"
+            exit 1
+          fi
+
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
 
           mkdir -p /tmp/ipa_work
@@ -112,6 +116,7 @@ jobs:
 
           for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
             name=$(basename "$dylib")
+            echo "Injecting $name"
             cp "$dylib" "$APP_DIR/$name"
             "$IVINJECT" "$BINARY" "@executable_path/$name"
           done
@@ -120,3 +125,5 @@ jobs:
 
           mkdir -p ${{ github.workspace }}/packages
           cp App_deluxe.ipa ${{ github.workspace }}/packages/
+
+          echo "✅ Injection completed"
