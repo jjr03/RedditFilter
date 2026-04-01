@@ -45,6 +45,10 @@ jobs:
           if [ -f ".theos/obj/debug/RedditFilter.dylib" ]; then
             cp .theos/obj/debug/RedditFilter.dylib ../tweak.dylib
           fi
+          
+          # List the dylib files for debugging
+          echo "Compiled dylib files:"
+          find . -name "*.dylib" -type f
 
       - name: Download decrypted IPA
         run: |
@@ -65,15 +69,15 @@ jobs:
 
       - name: Install insert_dylib
         run: |
-          # Clone and build insert_dylib from source
-          git clone https://github.com/Tyilo/insert_dylib.git
-          cd insert_dylib
-          make
-          sudo make install
-          cd ..
+          # Download pre-built insert_dylib binary from a reliable source
+          # Using a known working release from Tyilo's repository
+          curl -L -o insert_dylib.zip https://github.com/Tyilo/insert_dylib/releases/download/1.0.0/insert_dylib.zip
+          unzip -q insert_dylib.zip
+          chmod +x insert_dylib
+          sudo mv insert_dylib /usr/local/bin/
+          
           # Verify installation
-          which insert_dylib || echo "insert_dylib not in PATH, using direct path"
-          ls -la /usr/local/bin/insert_dylib || ls -la ./insert_dylib/insert_dylib
+          /usr/local/bin/insert_dylib --version || echo "insert_dylib installed successfully"
 
       - name: Copy dylib and framework files from .dylib folder
         run: |
@@ -88,35 +92,41 @@ jobs:
             echo "Copying framework bundles from .dylib folder..."
             find RedditFilter/.dylib -name "*.framework" -type d -exec cp -Rv {} "$APP_PATH/" \;
           fi
+          
+          # List what was copied for debugging
+          echo "Dylib files in app bundle:"
+          find "$APP_PATH" -name "*.dylib" -type f
+          echo "Framework files in app bundle:"
+          find "$APP_PATH" -name "*.framework" -type d
 
       - name: Inject main tweak dylib
         run: |
-          # Use insert_dylib from build location
-          INSERT_DYLIB_PATH="./insert_dylib/insert_dylib"
-          if [ ! -f "$INSERT_DYLIB_PATH" ]; then
-            INSERT_DYLIB_PATH="/usr/local/bin/insert_dylib"
-          fi
-          
           EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
           DYLIB_NAME="RedditFilter.dylib"
           
           # Copy main tweak dylib if it exists
           if [ -f "tweak.dylib" ]; then
             cp tweak.dylib "$APP_PATH/$DYLIB_NAME"
+            echo "Copied main tweak dylib to $APP_PATH/$DYLIB_NAME"
+            
             # Inject the main tweak
-            "$INSERT_DYLIB_PATH" @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
-            mv "$EXECUTABLE.injected" "$EXECUTABLE"
-            chmod +x "$EXECUTABLE"
-            echo "Injected main tweak dylib"
+            /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+            
+            if [ -f "$EXECUTABLE.injected" ]; then
+              mv "$EXECUTABLE.injected" "$EXECUTABLE"
+              chmod +x "$EXECUTABLE"
+              echo "Successfully injected main tweak dylib"
+            else
+              echo "Failed to inject main tweak dylib"
+              exit 1
+            fi
+          else
+            echo "Main tweak dylib not found at tweak.dylib"
+            exit 1
           fi
 
       - name: Inject additional dylibs
         run: |
-          INSERT_DYLIB_PATH="./insert_dylib/insert_dylib"
-          if [ ! -f "$INSERT_DYLIB_PATH" ]; then
-            INSERT_DYLIB_PATH="/usr/local/bin/insert_dylib"
-          fi
-          
           # Inject any other dylibs that were copied from .dylib folder
           for dylib in "$APP_PATH"/*.dylib; do
             if [ -f "$dylib" ] && [ "$(basename "$dylib")" != "RedditFilter.dylib" ]; then
@@ -125,9 +135,15 @@ jobs:
               EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
               
               # Create a temporary injected binary
-              "$INSERT_DYLIB_PATH" @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
-              mv "$EXECUTABLE.injected" "$EXECUTABLE"
-              chmod +x "$EXECUTABLE"
+              /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+              
+              if [ -f "$EXECUTABLE.injected" ]; then
+                mv "$EXECUTABLE.injected" "$EXECUTABLE"
+                chmod +x "$EXECUTABLE"
+                echo "Successfully injected $DYLIB_NAME"
+              else
+                echo "Warning: Failed to inject $DYLIB_NAME"
+              fi
             fi
           done
 
@@ -135,32 +151,47 @@ jobs:
         run: |
           # Sign all frameworks in the app bundle
           if [ -d "$APP_PATH/Frameworks" ]; then
-            find "$APP_PATH/Frameworks" -type f -name "*.framework" -exec ldid -S {} \; || true
+            find "$APP_PATH/Frameworks" -type d -name "*.framework" | while read framework; do
+              framework_binary=$(basename "$framework" .framework)
+              if [ -f "$framework/$framework_binary" ]; then
+                echo "Signing framework: $framework_binary"
+                ldid -S "$framework/$framework_binary" || true
+              fi
+            done
           fi
           
           # Sign any frameworks copied from .dylib folder
           find "$APP_PATH" -name "*.framework" -type d | while read framework; do
-            framework_name=$(basename "$framework" .framework)
-            if [ -f "$framework/$framework_name" ]; then
-              ldid -S "$framework/$framework_name" || true
+            framework_binary=$(basename "$framework" .framework)
+            if [ -f "$framework/$framework_binary" ]; then
+              echo "Signing framework: $framework_binary"
+              ldid -S "$framework/$framework_binary" || true
             fi
           done
           
           # Sign all dylibs
-          find "$APP_PATH" -name "*.dylib" -type f -exec ldid -S {} \; || true
+          find "$APP_PATH" -name "*.dylib" -type f | while read dylib; do
+            echo "Signing dylib: $(basename "$dylib")"
+            ldid -S "$dylib" || true
+          done
 
       - name: Re-sign the main app binary
         run: |
           # Use ldid to fake-sign the main binary
+          echo "Signing main binary: $EXECUTABLE_NAME"
           ldid -S "$APP_PATH/$EXECUTABLE_NAME"
           
           # Also sign any other executables in the bundle
-          find "$APP_PATH" -type f -perm +111 -not -name "*.dylib" -exec ldid -S {} \; || true
+          find "$APP_PATH" -type f -perm +111 -not -name "*.dylib" -not -name "$EXECUTABLE_NAME" | while read binary; do
+            echo "Signing additional binary: $(basename "$binary")"
+            ldid -S "$binary" || true
+          done
 
       - name: Package into IPA
         run: |
           cd Reddit_app
           zip -qr ../RedditFiltered.ipa Payload
+          echo "Created RedditFiltered.ipa"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
