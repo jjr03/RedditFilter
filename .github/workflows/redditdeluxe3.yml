@@ -67,17 +67,30 @@ jobs:
           # Make a backup of the original binary
           cp "$APP_PATH/$EXECUTABLE_NAME" "$APP_PATH/$EXECUTABLE_NAME.original"
 
-      - name: Install insert_dylib
+      - name: Build insert_dylib from source
         run: |
-          # Download pre-built insert_dylib binary from a reliable source
-          # Using a known working release from Tyilo's repository
-          curl -L -o insert_dylib.zip https://github.com/Tyilo/insert_dylib/releases/download/1.0.0/insert_dylib.zip
-          unzip -q insert_dylib.zip
-          chmod +x insert_dylib
-          sudo mv insert_dylib /usr/local/bin/
+          # Clone the insert_dylib repository
+          git clone https://github.com/Tyilo/insert_dylib.git
+          cd insert_dylib
+          
+          # Build using xcodebuild
+          xcodebuild -project insert_dylib.xcodeproj -target insert_dylib -configuration Release
+          
+          # Copy the built binary
+          cp build/Release/insert_dylib /usr/local/bin/
           
           # Verify installation
-          /usr/local/bin/insert_dylib --version || echo "insert_dylib installed successfully"
+          /usr/local/bin/insert_dylib --help || echo "insert_dylib installed"
+          cd ..
+
+      - name: Alternative - Download insert_dylib from GitHub directly
+        if: failure()
+        run: |
+          # If xcodebuild fails, try downloading from a known working binary
+          curl -L -o insert_dylib https://github.com/anthonya1999/insert_dylib/releases/download/1.0.0/insert_dylib
+          chmod +x insert_dylib
+          sudo mv insert_dylib /usr/local/bin/
+          /usr/local/bin/insert_dylib --help || echo "insert_dylib installed"
 
       - name: Copy dylib and framework files from .dylib folder
         run: |
