@@ -29,7 +29,7 @@ jobs:
           brew install ldid
           # Create SDK path for Theos
           sudo mkdir -p /opt/theos/sdks
-          # Download iPhoneOS SDK (adjust version as needed)
+          # Download iPhoneOS SDK
           curl -L -o /tmp/iPhoneOS16.5.sdk.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
           unzip -q /tmp/iPhoneOS16.5.sdk.zip -d /tmp/
           sudo mv /tmp/sdks-master/*.sdk /opt/theos/sdks/ || true
@@ -63,25 +63,39 @@ jobs:
           # Make a backup of the original binary
           cp "$APP_PATH/$EXECUTABLE_NAME" "$APP_PATH/$EXECUTABLE_NAME.original"
 
+      - name: Install insert_dylib
+        run: |
+          # Clone and build insert_dylib from source
+          git clone https://github.com/Tyilo/insert_dylib.git
+          cd insert_dylib
+          make
+          sudo make install
+          cd ..
+          # Verify installation
+          which insert_dylib || echo "insert_dylib not in PATH, using direct path"
+          ls -la /usr/local/bin/insert_dylib || ls -la ./insert_dylib/insert_dylib
+
       - name: Copy dylib and framework files from .dylib folder
         run: |
           # Copy all .dylib files from the .dylib folder to the app bundle
           if [ -d "RedditFilter/.dylib" ]; then
             echo "Copying dylib files from .dylib folder..."
-            find RedditFilter/.dylib -name "*.dylib" -type f -exec cp {} "$APP_PATH/" \;
+            find RedditFilter/.dylib -name "*.dylib" -type f -exec cp -v {} "$APP_PATH/" \;
           fi
           
           # Copy all .framework bundles from the .dylib folder to the app bundle
           if [ -d "RedditFilter/.dylib" ]; then
             echo "Copying framework bundles from .dylib folder..."
-            find RedditFilter/.dylib -name "*.framework" -type d -exec cp -R {} "$APP_PATH/" \;
+            find RedditFilter/.dylib -name "*.framework" -type d -exec cp -Rv {} "$APP_PATH/" \;
           fi
 
       - name: Inject main tweak dylib
         run: |
-          # Download insert_dylib
-          curl -L -o insert_dylib https://github.com/Tyilo/insert_dylib/releases/download/v1.0.0/insert_dylib
-          chmod +x insert_dylib
+          # Use insert_dylib from build location
+          INSERT_DYLIB_PATH="./insert_dylib/insert_dylib"
+          if [ ! -f "$INSERT_DYLIB_PATH" ]; then
+            INSERT_DYLIB_PATH="/usr/local/bin/insert_dylib"
+          fi
           
           EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
           DYLIB_NAME="RedditFilter.dylib"
@@ -90,7 +104,7 @@ jobs:
           if [ -f "tweak.dylib" ]; then
             cp tweak.dylib "$APP_PATH/$DYLIB_NAME"
             # Inject the main tweak
-            ./insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+            "$INSERT_DYLIB_PATH" @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
             mv "$EXECUTABLE.injected" "$EXECUTABLE"
             chmod +x "$EXECUTABLE"
             echo "Injected main tweak dylib"
@@ -98,6 +112,11 @@ jobs:
 
       - name: Inject additional dylibs
         run: |
+          INSERT_DYLIB_PATH="./insert_dylib/insert_dylib"
+          if [ ! -f "$INSERT_DYLIB_PATH" ]; then
+            INSERT_DYLIB_PATH="/usr/local/bin/insert_dylib"
+          fi
+          
           # Inject any other dylibs that were copied from .dylib folder
           for dylib in "$APP_PATH"/*.dylib; do
             if [ -f "$dylib" ] && [ "$(basename "$dylib")" != "RedditFilter.dylib" ]; then
@@ -106,7 +125,7 @@ jobs:
               EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
               
               # Create a temporary injected binary
-              ./insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+              "$INSERT_DYLIB_PATH" @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
               mv "$EXECUTABLE.injected" "$EXECUTABLE"
               chmod +x "$EXECUTABLE"
             fi
@@ -120,7 +139,12 @@ jobs:
           fi
           
           # Sign any frameworks copied from .dylib folder
-          find "$APP_PATH" -name "*.framework" -type d -exec ldid -S {}/$(basename {} .framework) \; || true
+          find "$APP_PATH" -name "*.framework" -type d | while read framework; do
+            framework_name=$(basename "$framework" .framework)
+            if [ -f "$framework/$framework_name" ]; then
+              ldid -S "$framework/$framework_name" || true
+            fi
+          done
           
           # Sign all dylibs
           find "$APP_PATH" -name "*.dylib" -type f -exec ldid -S {} \; || true
