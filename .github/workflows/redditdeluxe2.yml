@@ -1,143 +1,213 @@
-name: RedditDeluxe2
+name: Inject Tweak into IPA
 
 on:
-  push:
   workflow_dispatch:
     inputs:
-      create_release:
-        description: "Build IPA and create draft release"
-        default: false
-        type: boolean
       ipa_url:
-        description: "Direct URL to Decrypted IPA file"
+        description: 'URL of the decrypted Reddit .ipa file'
+        required: true
         type: string
-        required: false
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-
+    runs-on: macos-latest
     steps:
-      - name: 📥 Checkout repo
+      - name: Checkout RedditFilter repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive
-          fetch-depth: 0
+          repository: surrel14/RedditFilter
+          path: RedditFilter
 
-      - name: 🧰 Install dependencies
+      - name: Install Theos
         run: |
-          sudo apt update
-          sudo apt install -y rsync xmlstarlet unzip zip clang git make
+          sudo mkdir -p /opt/theos
+          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+          echo "THEOS=/opt/theos" >> $GITHUB_ENV
 
-      - name: 🛠 Setup Theos
-        uses: level3tjg/theos-action@main
-        with:
-          cache: true
-          cache-dir-theos: ${{ github.workspace }}/theos
-          cache-dir-sdks: ${{ github.workspace }}/theos/sdks
-
-      # 🔥 FIX: build insert_dylib from source (no broken downloads)
-      - name: 🔧 Build insert_dylib
+      - name: Install ldid and dependencies
         run: |
-          set -e
+          brew install ldid
+          # Create SDK path for Theos
+          sudo mkdir -p /opt/theos/sdks
+          # Download iPhoneOS SDK
+          curl -L -o /tmp/iPhoneOS16.5.sdk.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+          unzip -q /tmp/iPhoneOS16.5.sdk.zip -d /tmp/
+          sudo mv /tmp/sdks-master/*.sdk /opt/theos/sdks/ || true
 
-          mkdir -p tools
-          cd tools
+      - name: Compile Tweak
+        run: |
+          cd RedditFilter
+          make package
+          # Find and copy the compiled .dylib
+          find . -name "*.dylib" -type f -not -path "./.dylib/*" -exec cp {} ../tweak.dylib \;
+          
+          # If the compiled dylib has a specific name, ensure it's copied
+          if [ -f ".theos/obj/debug/RedditFilter.dylib" ]; then
+            cp .theos/obj/debug/RedditFilter.dylib ../tweak.dylib
+          fi
+          
+          # List the dylib files for debugging
+          echo "Compiled dylib files:"
+          find . -name "*.dylib" -type f
 
-          git clone https://github.com/tyilo/insert_dylib.git
+      - name: Download decrypted IPA
+        run: |
+          curl -L -o Reddit.ipa "${{ github.event.inputs.ipa_url }}"
+
+      - name: Prepare for injection
+        run: |
+          # Unzip the IPA
+          unzip -q Reddit.ipa -d Reddit_app
+          # Find the main executable bundle
+          APP_PATH=$(find Reddit_app/Payload -name "*.app" -type d)
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          # Find the main executable name
+          EXECUTABLE_NAME=$(basename "$APP_PATH" .app)
+          echo "EXECUTABLE_NAME=$EXECUTABLE_NAME" >> $GITHUB_ENV
+          # Make a backup of the original binary
+          cp "$APP_PATH/$EXECUTABLE_NAME" "$APP_PATH/$EXECUTABLE_NAME.original"
+
+      - name: Build insert_dylib from source
+        run: |
+          # Clone the insert_dylib repository
+          git clone https://github.com/Tyilo/insert_dylib.git
           cd insert_dylib
+          
+          # Build using xcodebuild (not make)
+          xcodebuild -project insert_dylib.xcodeproj -target insert_dylib -configuration Release -quiet
+          
+          # Copy the built binary
+          sudo cp build/Release/insert_dylib /usr/local/bin/insert_dylib
+          sudo chmod +x /usr/local/bin/insert_dylib
+          
+          # Verify installation
+          /usr/local/bin/insert_dylib --help > /dev/null 2>&1 && echo "insert_dylib installed successfully"
+          cd ..
 
-          make
-
-          chmod +x insert_dylib
-          cp insert_dylib ../
-
-          echo "✅ insert_dylib built"
-          ls -la ../
-
-      - name: 📥 Download IPA (Auto)
-        if: ${{ inputs.create_release && !inputs.ipa_url }}
-        uses: level3tjg/decryptedappstore-action@main
-        with:
-          appstore_url: "https://apps.apple.com/us/app/reddit/id1064216828"
-          cache: true
-          path: ${{ github.workspace }}/App.ipa
-          token: ${{ secrets.DECRYPTEDAPPSTORE_SESSION_TOKEN }}
-
-      - name: 📥 Download IPA (Manual)
-        if: ${{ inputs.create_release && inputs.ipa_url }}
+      - name: Alternative - Download insert_dylib if build fails
+        if: failure()
         run: |
-          curl -Lo "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
-          zip -T "${{ github.workspace }}/App.ipa"
+          # If xcodebuild fails, download pre-built binary
+          sudo curl -L -o /usr/local/bin/insert_dylib https://github.com/anthonya1999/insert_dylib/releases/download/1.0.0/insert_dylib
+          sudo chmod +x /usr/local/bin/insert_dylib
+          /usr/local/bin/insert_dylib --help > /dev/null 2>&1 && echo "insert_dylib installed via download"
 
-      - name: 📊 Get IPA Info
-        if: ${{ inputs.create_release }}
-        id: ipa_info
+      - name: Copy dylib and framework files from .dylib folder
         run: |
-          info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+          # Copy all .dylib files from the .dylib folder to the app bundle
+          if [ -d "RedditFilter/.dylib" ]; then
+            echo "Copying dylib files from .dylib folder..."
+            find RedditFilter/.dylib -name "*.dylib" -type f -exec cp -v {} "$APP_PATH/" \;
+          fi
+          
+          # Copy all .framework bundles from the .dylib folder to the app bundle
+          if [ -d "RedditFilter/.dylib" ]; then
+            echo "Copying framework bundles from .dylib folder..."
+            find RedditFilter/.dylib -name "*.framework" -type d -exec cp -Rv {} "$APP_PATH/" \;
+          fi
+          
+          # List what was copied for debugging
+          echo "Dylib files in app bundle:"
+          find "$APP_PATH" -name "*.dylib" -type f
+          echo "Framework files in app bundle:"
+          find "$APP_PATH" -name "*.framework" -type d
 
-      - name: 📦 Build IPA
-        if: ${{ inputs.create_release }}
-        run: make package
-        env:
-          FINALPACKAGE: 1
-          SIDELOADED: 1
-          IPA: ${{ github.workspace }}/App.ipa
-          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
-
-      - name: 💉 Inject dylibs
-        if: ${{ inputs.create_release }}
+      - name: Inject main tweak dylib
         run: |
-          set -e
-
-          INSERT="${{ github.workspace }}/tools/insert_dylib"
-
-          if [ ! -f "$INSERT" ]; then
-            echo "❌ insert_dylib not found!"
+          EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
+          DYLIB_NAME="RedditFilter.dylib"
+          
+          # Copy main tweak dylib if it exists
+          if [ -f "tweak.dylib" ]; then
+            cp tweak.dylib "$APP_PATH/$DYLIB_NAME"
+            echo "Copied main tweak dylib to $APP_PATH/$DYLIB_NAME"
+            
+            # Inject the main tweak
+            /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+            
+            if [ -f "$EXECUTABLE.injected" ]; then
+              mv "$EXECUTABLE.injected" "$EXECUTABLE"
+              chmod +x "$EXECUTABLE"
+              echo "Successfully injected main tweak dylib"
+            else
+              echo "Failed to inject main tweak dylib"
+              exit 1
+            fi
+          else
+            echo "Main tweak dylib not found at tweak.dylib"
             exit 1
           fi
 
-          IPA_PATH=$(ls packages/*.ipa | head -n 1)
-          echo "Injecting into: $IPA_PATH"
-
-          mkdir -p /tmp/ipa_work
-          cp "$IPA_PATH" /tmp/ipa_work/App.ipa
-          cd /tmp/ipa_work
-          unzip -q App.ipa
-
-          APP_DIR=$(ls -d Payload/*.app | head -n 1)
-
-          BINARY_NAME=$(xmlstarlet sel -t -v \
-            "/plist/dict/key[text()='CFBundleExecutable']/following-sibling::*[1]/text()" \
-            "$APP_DIR/Info.plist")
-
-          BINARY="$APP_DIR/$BINARY_NAME"
-          echo "Main binary: $BINARY"
-
-          for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
-            name=$(basename "$dylib")
-            echo "Injecting $name"
-
-            cp "$dylib" "$APP_DIR/$name"
-
-            "$INSERT" \
-              --inplace \
-              --strip-codesig \
-              "@executable_path/$name" \
-              "$BINARY"
+      - name: Inject additional dylibs
+        run: |
+          # Inject any other dylibs that were copied from .dylib folder
+          for dylib in "$APP_PATH"/*.dylib; do
+            if [ -f "$dylib" ] && [ "$(basename "$dylib")" != "RedditFilter.dylib" ]; then
+              DYLIB_NAME=$(basename "$dylib")
+              echo "Injecting additional dylib: $DYLIB_NAME"
+              EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
+              
+              # Create a temporary injected binary
+              /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+              
+              if [ -f "$EXECUTABLE.injected" ]; then
+                mv "$EXECUTABLE.injected" "$EXECUTABLE"
+                chmod +x "$EXECUTABLE"
+                echo "Successfully injected $DYLIB_NAME"
+              else
+                echo "Warning: Failed to inject $DYLIB_NAME"
+              fi
+            fi
           done
 
-          zip -qr App_deluxe.ipa Payload/
+      - name: Sign frameworks and dylibs
+        run: |
+          # Sign all frameworks in the app bundle
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            find "$APP_PATH/Frameworks" -type d -name "*.framework" | while read framework; do
+              framework_binary=$(basename "$framework" .framework)
+              if [ -f "$framework/$framework_binary" ]; then
+                echo "Signing framework: $framework_binary"
+                ldid -S "$framework/$framework_binary" || true
+              fi
+            done
+          fi
+          
+          # Sign any frameworks copied from .dylib folder
+          find "$APP_PATH" -name "*.framework" -type d | while read framework; do
+            framework_binary=$(basename "$framework" .framework)
+            if [ -f "$framework/$framework_binary" ]; then
+              echo "Signing framework: $framework_binary"
+              ldid -S "$framework/$framework_binary" || true
+            fi
+          done
+          
+          # Sign all dylibs
+          find "$APP_PATH" -name "*.dylib" -type f | while read dylib; do
+            echo "Signing dylib: $(basename "$dylib")"
+            ldid -S "$dylib" || true
+          done
 
-          mkdir -p ${{ github.workspace }}/packages
-          cp App_deluxe.ipa ${{ github.workspace }}/packages/
+      - name: Re-sign the main app binary
+        run: |
+          # Use ldid to fake-sign the main binary
+          echo "Signing main binary: $EXECUTABLE_NAME"
+          ldid -S "$APP_PATH/$EXECUTABLE_NAME"
+          
+          # Also sign any other executables in the bundle
+          find "$APP_PATH" -type f -perm +111 -not -name "*.dylib" -not -name "$EXECUTABLE_NAME" | while read binary; do
+            echo "Signing additional binary: $(basename "$binary")"
+            ldid -S "$binary" || true
+          done
 
-          echo "✅ Injection completed"
+      - name: Package into IPA
+        run: |
+          cd Reddit_app
+          zip -qr ../RedditFiltered.ipa Payload
+          echo "Created RedditFiltered.ipa"
 
-      - name: 📤 Upload artifacts
-        if: ${{ inputs.create_release }}
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: injected-ipa
-          path: packages/*
+          name: RedditFiltered.ipa
+          path: RedditFiltered.ipa
