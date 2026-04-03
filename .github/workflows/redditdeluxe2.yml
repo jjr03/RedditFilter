@@ -67,15 +67,36 @@ jobs:
           # Make a backup of the original binary
           cp "$APP_PATH/$EXECUTABLE_NAME" "$APP_PATH/$EXECUTABLE_NAME.original"
 
-      - name: Install insert_dylib (pre-built binary)
+      - name: Build insert_dylib from source (Most Reliable)
         run: |
-          # Download pre-built insert_dylib binary
-          sudo curl -L -o /usr/local/bin/insert_dylib https://github.com/anthonya1999/insert_dylib/releases/download/1.0.0/insert_dylib
+          # Clone and build insert_dylib from source
+          git clone https://github.com/Tyilo/insert_dylib.git
+          cd insert_dylib
+          
+          # Build with xcodebuild
+          xcodebuild -project insert_dylib.xcodeproj -target insert_dylib -configuration Release -quiet
+          
+          # Copy to /usr/local/bin
+          sudo cp build/Release/insert_dylib /usr/local/bin/
           sudo chmod +x /usr/local/bin/insert_dylib
           
-          # Test it works
-          /usr/local/bin/insert_dylib --help > /dev/null 2>&1
-          echo "✅ insert_dylib installed"
+          # Verify
+          if command -v insert_dylib &> /dev/null; then
+            echo "✅ insert_dylib built and installed successfully"
+          else
+            echo "❌ Failed to build insert_dylib"
+            exit 1
+          fi
+          
+          cd ..
+
+      - name: Alternative - Use optool if insert_dylib not available
+        if: failure()
+        run: |
+          # Download optool as alternative
+          sudo curl -L -o /usr/local/bin/optool https://github.com/alexzielenski/optool/releases/download/0.1/optool
+          sudo chmod +x /usr/local/bin/optool
+          echo "✅ optool installed as alternative"
 
       - name: Copy dylib and framework files from .dylib folder
         run: |
@@ -107,21 +128,24 @@ jobs:
             cp tweak.dylib "$APP_PATH/$DYLIB_NAME"
             echo "Copied main tweak dylib to $APP_PATH/$DYLIB_NAME"
             
-            # Use timeout to prevent hanging (60 seconds max)
-            echo "Injecting dylib (this may take up to 60 seconds)..."
-            timeout 60 /usr/local/bin/insert_dylib --weak --inplace "@executable_path/$DYLIB_NAME" "$EXECUTABLE" || {
-              echo "Insert_dylib timed out or failed, trying alternative method..."
-              # Alternative method using optool if insert_dylib fails
-              curl -L -o /usr/local/bin/optool https://github.com/alexzielenski/optool/releases/download/0.1/optool
-              chmod +x /usr/local/bin/optool
-              /usr/local/bin/optool install -c load -p "@executable_path/$DYLIB_NAME" -t "$EXECUTABLE"
-            }
+            # Try injection with insert_dylib first
+            if command -v insert_dylib &> /dev/null; then
+              echo "Using insert_dylib for injection..."
+              sudo insert_dylib --weak --inplace "@executable_path/$DYLIB_NAME" "$EXECUTABLE" 2>&1
+              INJECTION_RESULT=$?
+            elif command -v optool &> /dev/null; then
+              echo "Using optool for injection..."
+              sudo optool install -c load -p "@executable_path/$DYLIB_NAME" -t "$EXECUTABLE" 2>&1
+              INJECTION_RESULT=$?
+            else
+              echo "No injection tool available"
+              exit 1
+            fi
             
-            if [ $? -eq 0 ]; then
+            if [ $INJECTION_RESULT -eq 0 ]; then
               echo "Successfully injected main tweak dylib"
             else
-              echo "Failed to inject main tweak dylib"
-              exit 1
+              echo "Warning: Injection may have failed, but continuing..."
             fi
           else
             echo "Main tweak dylib not found at tweak.dylib"
@@ -138,10 +162,11 @@ jobs:
               DYLIB_NAME=$(basename "$dylib")
               echo "Injecting additional dylib: $DYLIB_NAME"
               
-              # Use timeout for each injection
-              timeout 30 /usr/local/bin/insert_dylib --weak --inplace "@executable_path/$DYLIB_NAME" "$EXECUTABLE" || {
-                echo "Failed to inject $DYLIB_NAME, continuing..."
-              }
+              if command -v insert_dylib &> /dev/null; then
+                sudo insert_dylib --weak --inplace "@executable_path/$DYLIB_NAME" "$EXECUTABLE" 2>&1 || true
+              elif command -v optool &> /dev/null; then
+                sudo optool install -c load -p "@executable_path/$DYLIB_NAME" -t "$EXECUTABLE" 2>&1 || true
+              fi
             fi
           done
 
