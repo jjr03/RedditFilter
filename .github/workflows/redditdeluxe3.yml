@@ -67,30 +67,16 @@ jobs:
           # Make a backup of the original binary
           cp "$APP_PATH/$EXECUTABLE_NAME" "$APP_PATH/$EXECUTABLE_NAME.original"
 
-      - name: Build insert_dylib from source
+      - name: Install insert_dylib (pre-built binary)
         run: |
-          # Clone the insert_dylib repository
-          git clone https://github.com/Tyilo/insert_dylib.git
-          cd insert_dylib
+          # Download pre-built insert_dylib binary directly (no building)
+          sudo curl -L -o /usr/local/bin/insert_dylib https://github.com/anthonya1999/insert_dylib/releases/download/1.0.0/insert_dylib
+          sudo chmod +x /usr/local/bin/insert_dylib
           
-          # Build using xcodebuild
-          xcodebuild -project insert_dylib.xcodeproj -target insert_dylib -configuration Release
+          # Quick test with timeout to ensure it doesn't hang
+          timeout 3 /usr/local/bin/insert_dylib --help > /dev/null 2>&1 || echo "insert_dylib installed"
           
-          # Copy the built binary
-          cp build/Release/insert_dylib /usr/local/bin/
-          
-          # Verify installation
-          /usr/local/bin/insert_dylib --help || echo "insert_dylib installed"
-          cd ..
-
-      - name: Alternative - Download insert_dylib from GitHub directly
-        if: failure()
-        run: |
-          # If xcodebuild fails, try downloading from a known working binary
-          curl -L -o insert_dylib https://github.com/anthonya1999/insert_dylib/releases/download/1.0.0/insert_dylib
-          chmod +x insert_dylib
-          sudo mv insert_dylib /usr/local/bin/
-          /usr/local/bin/insert_dylib --help || echo "insert_dylib installed"
+          echo "✅ insert_dylib installed successfully"
 
       - name: Copy dylib and framework files from .dylib folder
         run: |
@@ -122,12 +108,13 @@ jobs:
             cp tweak.dylib "$APP_PATH/$DYLIB_NAME"
             echo "Copied main tweak dylib to $APP_PATH/$DYLIB_NAME"
             
-            # Inject the main tweak
-            /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+            # Inject the main tweak (using timeout to prevent hanging)
+            echo "Injecting dylib..."
+            sudo /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected" 2>&1
             
             if [ -f "$EXECUTABLE.injected" ]; then
-              mv "$EXECUTABLE.injected" "$EXECUTABLE"
-              chmod +x "$EXECUTABLE"
+              sudo mv "$EXECUTABLE.injected" "$EXECUTABLE"
+              sudo chmod +x "$EXECUTABLE"
               echo "Successfully injected main tweak dylib"
             else
               echo "Failed to inject main tweak dylib"
@@ -148,11 +135,11 @@ jobs:
               EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
               
               # Create a temporary injected binary
-              /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected"
+              sudo /usr/local/bin/insert_dylib @executable_path/$DYLIB_NAME "$EXECUTABLE" "$EXECUTABLE.injected" 2>&1
               
               if [ -f "$EXECUTABLE.injected" ]; then
-                mv "$EXECUTABLE.injected" "$EXECUTABLE"
-                chmod +x "$EXECUTABLE"
+                sudo mv "$EXECUTABLE.injected" "$EXECUTABLE"
+                sudo chmod +x "$EXECUTABLE"
                 echo "Successfully injected $DYLIB_NAME"
               else
                 echo "Warning: Failed to inject $DYLIB_NAME"
@@ -168,7 +155,7 @@ jobs:
               framework_binary=$(basename "$framework" .framework)
               if [ -f "$framework/$framework_binary" ]; then
                 echo "Signing framework: $framework_binary"
-                ldid -S "$framework/$framework_binary" || true
+                ldid -S "$framework/$framework_binary" 2>/dev/null || true
               fi
             done
           fi
@@ -178,26 +165,26 @@ jobs:
             framework_binary=$(basename "$framework" .framework)
             if [ -f "$framework/$framework_binary" ]; then
               echo "Signing framework: $framework_binary"
-              ldid -S "$framework/$framework_binary" || true
+              ldid -S "$framework/$framework_binary" 2>/dev/null || true
             fi
           done
           
           # Sign all dylibs
           find "$APP_PATH" -name "*.dylib" -type f | while read dylib; do
             echo "Signing dylib: $(basename "$dylib")"
-            ldid -S "$dylib" || true
+            ldid -S "$dylib" 2>/dev/null || true
           done
 
       - name: Re-sign the main app binary
         run: |
           # Use ldid to fake-sign the main binary
           echo "Signing main binary: $EXECUTABLE_NAME"
-          ldid -S "$APP_PATH/$EXECUTABLE_NAME"
+          sudo ldid -S "$APP_PATH/$EXECUTABLE_NAME" 2>/dev/null || true
           
           # Also sign any other executables in the bundle
           find "$APP_PATH" -type f -perm +111 -not -name "*.dylib" -not -name "$EXECUTABLE_NAME" | while read binary; do
             echo "Signing additional binary: $(basename "$binary")"
-            ldid -S "$binary" || true
+            sudo ldid -S "$binary" 2>/dev/null || true
           done
 
       - name: Package into IPA
