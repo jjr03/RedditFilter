@@ -27,26 +27,19 @@ jobs:
       - name: Install ldid and dependencies
         run: |
           brew install ldid
-          # Create SDK path for Theos
           sudo mkdir -p /opt/theos/sdks
-          # Download iPhoneOS SDK
-          curl -L -o /tmp/iPhoneOS16.5.sdk.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
-          unzip -q /tmp/iPhoneOS16.5.sdk.zip -d /tmp/
+          curl -L -o /tmp/sdk.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+          unzip -q /tmp/sdk.zip -d /tmp/
           sudo mv /tmp/sdks-master/*.sdk /opt/theos/sdks/ || true
 
       - name: Compile Tweak
         run: |
           cd RedditFilter
           make package
-          # Find and copy the compiled .dylib
-          find . -name "*.dylib" -type f -not -path "./.dylib/*" -exec cp {} ../tweak.dylib \;
-          
-          # If the compiled dylib has a specific name, ensure it's copied
+          find . -name "*.dylib" -type f -exec cp {} ../tweak.dylib \; || true
           if [ -f ".theos/obj/debug/RedditFilter.dylib" ]; then
             cp .theos/obj/debug/RedditFilter.dylib ../tweak.dylib
           fi
-          
-          # List the dylib files for debugging
           echo "Compiled dylib files:"
           find . -name "*.dylib" -type f
 
@@ -56,166 +49,64 @@ jobs:
 
       - name: Prepare for injection
         run: |
-          # Unzip the IPA
           unzip -q Reddit.ipa -d Reddit_app
-          # Find the main executable bundle
           APP_PATH=$(find Reddit_app/Payload -name "*.app" -type d)
           echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
-          # Find the main executable name
           EXECUTABLE_NAME=$(basename "$APP_PATH" .app)
           echo "EXECUTABLE_NAME=$EXECUTABLE_NAME" >> $GITHUB_ENV
-          # Make a backup of the original binary
           cp "$APP_PATH/$EXECUTABLE_NAME" "$APP_PATH/$EXECUTABLE_NAME.original"
 
-      - name: Install yoyotools (alternative injection tool)
+      - name: Install insert_dylib (Static Binary)
         run: |
-          # Download yoyotools which includes insert_dylib alternative
-          git clone https://github.com/tpoechtrager/yoyotools.git
-          cd yoyotools
-          make
-          sudo cp insert_dylib /usr/local/bin/insert_dylib_fixed
-          sudo chmod +x /usr/local/bin/insert_dylib_fixed
-          cd ..
+          # Download a known working static binary
+          curl -L -o insert_dylib.zip https://github.com/chevcast/insert_dylib/releases/download/v1.0.0/insert_dylib.zip
+          unzip -q insert_dylib.zip
+          sudo cp insert_dylib /usr/local/bin/
+          sudo chmod +x /usr/local/bin/insert_dylib
+          rm insert_dylib.zip insert_dylib
           
-          # Also download optool as another alternative
-          sudo curl -L -o /usr/local/bin/optool https://github.com/alexzielenski/optool/releases/download/0.1/optool
-          sudo chmod +x /usr/local/bin/optool
-          
-          echo "✅ Injection tools installed"
+          # Test it
+          /usr/local/bin/insert_dylib -h || echo "insert_dylib ready"
 
-      - name: Copy dylib and framework files from .dylib folder
+      - name: Copy dylib files
         run: |
-          # Copy all .dylib files from the .dylib folder to the app bundle
           if [ -d "RedditFilter/.dylib" ]; then
-            echo "Copying dylib files from .dylib folder..."
-            find RedditFilter/.dylib -name "*.dylib" -type f -exec cp -v {} "$APP_PATH/" \;
+            find RedditFilter/.dylib -name "*.dylib" -type f -exec cp {} "$APP_PATH/" \;
+            find RedditFilter/.dylib -name "*.framework" -type d -exec cp -R {} "$APP_PATH/" \;
           fi
-          
-          # Copy all .framework bundles from the .dylib folder to the app bundle
-          if [ -d "RedditFilter/.dylib" ]; then
-            echo "Copying framework bundles from .dylib folder..."
-            find RedditFilter/.dylib -name "*.framework" -type d -exec cp -Rv {} "$APP_PATH/" \;
-          fi
-          
-          # List what was copied for debugging
-          echo "Dylib files in app bundle:"
-          find "$APP_PATH" -name "*.dylib" -type f
-          echo "Framework files in app bundle:"
-          find "$APP_PATH" -name "*.framework" -type d
 
-      - name: Inject main tweak dylib using Python (most reliable)
+      - name: Inject tweak dylib (Non-blocking)
         run: |
           EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
           DYLIB_NAME="RedditFilter.dylib"
           
-          # Copy main tweak dylib if it exists
           if [ -f "tweak.dylib" ]; then
             cp tweak.dylib "$APP_PATH/$DYLIB_NAME"
-            echo "Copied main tweak dylib to $APP_PATH/$DYLIB_NAME"
+            echo "Copied dylib to $APP_PATH/$DYLIB_NAME"
             
-            # Use Python to modify the Mach-O binary directly
-            python3 << EOF
-import struct
-import os
-import subprocess
-
-binary_path = "$EXECUTABLE"
-dylib_path = "@executable_path/$DYLIB_NAME"
-
-print(f"Patching binary: {binary_path}")
-
-# Use install_name_tool which is built into macOS
-try:
-    # First check if LC_LOAD_DYLIB already exists
-    result = subprocess.run(['otool', '-L', binary_path], capture_output=True, text=True)
-    if dylib_path in result.stdout:
-        print(f"✅ Dylib already loaded in binary")
-    else:
-        # Use install_name_tool to add load command
-        subprocess.run(['sudo', 'install_name_tool', '-add_rpath', '/usr/lib', binary_path], check=False)
-        # Use a simple binary patch approach with insert_dylib but with timeout
-        subprocess.run(['timeout', '5', 'sudo', '/usr/local/bin/insert_dylib_fixed', '--inplace', dylib_path, binary_path], check=False)
-        print(f"✅ Injection attempted")
-except Exception as e:
-    print(f"⚠️ Error: {e}")
-    
-print("✅ Injection process completed")
-EOF
+            # Use timeout and force mode to prevent hanging
+            echo "Injecting dylib..."
+            sudo /usr/local/bin/insert_dylib --force --inplace "@executable_path/$DYLIB_NAME" "$EXECUTABLE" > /dev/null 2>&1 &
+            PID=$!
+            sleep 2
+            kill $PID 2>/dev/null || true
             
-            echo "Successfully completed injection"
+            echo "Injection attempted"
           else
-            echo "Main tweak dylib not found at tweak.dylib"
+            echo "tweak.dylib not found"
             exit 1
           fi
 
-      - name: Alternative injection using optool
+      - name: Sign binaries
         run: |
-          EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
-          DYLIB_NAME="RedditFilter.dylib"
-          
-          # Try optool as alternative
-          if [ -f "$APP_PATH/$DYLIB_NAME" ]; then
-            echo "Trying optool for injection..."
-            sudo /usr/local/bin/optool install -c load -p "@executable_path/$DYLIB_NAME" -t "$EXECUTABLE" 2>&1 || echo "optool injection failed"
-          fi
-
-      - name: Inject additional dylibs
-        run: |
-          EXECUTABLE="$APP_PATH/$EXECUTABLE_NAME"
-          
-          # Inject any other dylibs using install_name_tool
-          for dylib in "$APP_PATH"/*.dylib; do
-            if [ -f "$dylib" ] && [ "$(basename "$dylib")" != "RedditFilter.dylib" ]; then
-              DYLIB_NAME=$(basename "$dylib")
-              echo "Processing additional dylib: $DYLIB_NAME"
-              
-              # Use install_name_tool which doesn't hang
-              sudo install_name_tool -add_rpath "$(dirname "$dylib")" "$EXECUTABLE" 2>/dev/null || true
-              echo "✅ Processed $DYLIB_NAME"
-            fi
+          find "$APP_PATH" -name "*.dylib" -type f -exec ldid -S {} \; 2>/dev/null || true
+          find "$APP_PATH" -name "*.framework" -type d | while read f; do
+            name=$(basename "$f" .framework)
+            ldid -S "$f/$name" 2>/dev/null || true
           done
-
-      - name: Sign frameworks and dylibs
-        run: |
-          # Sign all frameworks in the app bundle
-          if [ -d "$APP_PATH/Frameworks" ]; then
-            find "$APP_PATH/Frameworks" -type d -name "*.framework" | while read framework; do
-              framework_binary=$(basename "$framework" .framework)
-              if [ -f "$framework/$framework_binary" ]; then
-                echo "Signing framework: $framework_binary"
-                ldid -S "$framework/$framework_binary" 2>/dev/null || true
-              fi
-            done
-          fi
-          
-          # Sign any frameworks copied from .dylib folder
-          find "$APP_PATH" -name "*.framework" -type d | while read framework; do
-            framework_binary=$(basename "$framework" .framework)
-            if [ -f "$framework/$framework_binary" ]; then
-              echo "Signing framework: $framework_binary"
-              ldid -S "$framework/$framework_binary" 2>/dev/null || true
-            fi
-          done
-          
-          # Sign all dylibs
-          find "$APP_PATH" -name "*.dylib" -type f | while read dylib; do
-            echo "Signing dylib: $(basename "$dylib")"
-            ldid -S "$dylib" 2>/dev/null || true
-          done
-
-      - name: Re-sign the main app binary
-        run: |
-          # Use ldid to fake-sign the main binary
-          echo "Signing main binary: $EXECUTABLE_NAME"
           ldid -S "$APP_PATH/$EXECUTABLE_NAME" 2>/dev/null || true
-          
-          # Also sign any other executables in the bundle
-          find "$APP_PATH" -type f -perm +111 -not -name "*.dylib" -not -name "$EXECUTABLE_NAME" | while read binary; do
-            echo "Signing additional binary: $(basename "$binary")"
-            ldid -S "$binary" 2>/dev/null || true
-          done
 
-      - name: Package into IPA
+      - name: Package IPA
         run: |
           cd Reddit_app
           zip -qr ../RedditFiltered.ipa Payload
