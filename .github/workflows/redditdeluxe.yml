@@ -48,13 +48,15 @@ jobs:
           sudo make install
           sudo ldconfig
 
-      - name: Build insert_dylib
+      - name: Build insert_dylib (Linux fork)
         if: ${{ inputs.create_release }}
         run: |
-          sudo apt install -y clang
-          git clone --depth=1 https://github.com/tyilo/insert_dylib /tmp/insert_dylib_src
-          clang -o /tmp/insert_dylib /tmp/insert_dylib_src/insert_dylib/main.c
-          chmod +x /tmp/insert_dylib
+          git clone --depth=1 https://github.com/LeanVel/insert_dylib /tmp/insert_dylib_src
+          cd /tmp/insert_dylib_src
+          chmod +x Install.sh
+          sudo ./Install.sh
+          which insert_dylib
+          insert_dylib --help || true
 
       - name: Download IPA (Auto)
         if: ${{ inputs.create_release && !inputs.ipa_url }}
@@ -142,7 +144,7 @@ jobs:
             echo "Copying dylib: $name"
             cp "$dylib" "$APP_DIR/$name"
             echo "Injecting load command for: $name"
-            /tmp/insert_dylib --strip-codesig --inplace \
+            insert_dylib --strip-codesig --inplace \
               "@executable_path/$name" "$BINARY"
           done
 
@@ -156,7 +158,7 @@ jobs:
             bin_path="$APP_DIR/Frameworks/$framework_name/$fname"
             if [ -f "$bin_path" ]; then
               echo "Injecting load command for: $framework_name"
-              /tmp/insert_dylib --strip-codesig --inplace \
+              insert_dylib --strip-codesig --inplace \
                 "@executable_path/Frameworks/$framework_name/$fname" "$BINARY"
             else
               echo "WARNING: No binary found at $bin_path, skipping inject."
