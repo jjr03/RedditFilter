@@ -80,24 +80,27 @@ jobs:
           path: RedditFilter
           submodules: recursive
 
+      - name: Install insert_dylib
+        if: ${{ inputs.create_release }}
+        run: |
+          git clone https://github.com/Tyilo/insert_dylib.git
+          cd insert_dylib
+          make
+          sudo cp insert_dylib /usr/local/bin/
+
       - name: Copy dylib and framework files to IPA
         if: ${{ inputs.create_release }}
         run: |
           unzip -o "${{ github.workspace }}/App.ipa" -d "${{ github.workspace }}/extracted_ipa"
           mkdir -p "${{ github.workspace }}/extracted_ipa/Payload/YourApp.app/Frameworks"
           cp -r "${{ github.workspace }}/RedditFilter/.dylib/"* "${{ github.workspace }}/extracted_ipa/Payload/YourApp.app/Frameworks/"
-          # Se vuoi copiare solo .dylib:
-          # find "${{ github.workspace }}/RedditFilter/.dylib" -name "*.dylib" -exec cp {} "${{ github.workspace }}/extracted_ipa/Payload/YourApp.app/Frameworks/" \;
           (cd "${{ github.workspace }}/extracted_ipa" && zip -r9 "${{ github.workspace }}/App.ipa" .)
 
       - name: Inject dylib/framework into the IPA
         if: ${{ inputs.create_release }}
         run: |
           insert_dylib @executable_path/Frameworks/REdditFilter.framework/REdditFilter "${{ github.workspace }}/extracted_ipa/Payload/YourApp.app/YourApp"
-          # Oppure, se vuoi usare yololib:
-          # yololib -i "${{ github.workspace }}/extracted_ipa/Payload/YourApp.app/YourApp" "${{ github.workspace }}/extracted_ipa/Payload/YourApp.app/Frameworks/REdditFilter.framework/REdditFilter"
           (cd "${{ github.workspace }}/extracted_ipa" && zip -r9 "${{ github.workspace }}/App.ipa" .)
-
       # --- FINE NUOVO ---
 
       - name: Setup theos
