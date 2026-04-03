@@ -84,9 +84,8 @@ jobs:
         if: ${{ inputs.create_release }}
         run: |
           git clone https://github.com/Tyilo/insert_dylib.git
-          cd insert_dylib
+          cd insert_dylib/insert_dylib
           git submodule update --init --recursive
-          ls -la
           mkdir -p build && cd build
           cmake ..
           make
