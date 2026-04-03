@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync cmake
+          sudo apt install -y rsync clang
 
       - name: Install theos-jailed dependencies
         if: ${{ inputs.create_release }}
@@ -85,10 +85,7 @@ jobs:
         run: |
           git clone https://github.com/Tyilo/insert_dylib.git
           cd insert_dylib/insert_dylib
-          git submodule update --init --recursive
-          mkdir -p build && cd build
-          cmake ..
-          make
+          clang++ -o insert_dylib insert_dylib.cpp
           sudo cp insert_dylib /usr/local/bin/
 
       - name: Copy dylib and framework files to IPA
