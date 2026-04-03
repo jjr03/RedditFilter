@@ -48,6 +48,14 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build insert_dylib
+        if: ${{ inputs.create_release }}
+        run: |
+          sudo apt install -y clang
+          git clone --depth=1 https://github.com/tyilo/insert_dylib /tmp/insert_dylib_src
+          clang -o /tmp/insert_dylib /tmp/insert_dylib_src/insert_dylib/main.c
+          chmod +x /tmp/insert_dylib
+
       - name: Download IPA (Auto)
         if: ${{ inputs.create_release && !inputs.ipa_url }}
         uses: level3tjg/decryptedappstore-action@main
@@ -104,10 +112,6 @@ jobs:
         if: ${{ inputs.create_release }}
         run: |
           set -e
-
-          # Download insert_dylib (Linux binary)
-          curl -Lo /tmp/insert_dylib https://github.com/tyilo/insert_dylib/releases/download/1.0/insert_dylib-linux
-          chmod +x /tmp/insert_dylib
 
           # Find the built IPA
           IPA_PATH=$(ls packages/*.ipa | head -n 1)
