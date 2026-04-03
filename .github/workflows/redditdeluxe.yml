@@ -91,7 +91,7 @@ jobs:
         run: |
           ./theos-jailed/install
 
-      - name: Build IPA (with RedditFilter + extra dylibs)
+      - name: Build IPA (with RedditFilter)
         if: ${{ inputs.create_release }}
         run: make package
         env:
@@ -100,7 +100,7 @@ jobs:
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: Inject extra dylibs into IPA
+      - name: Inject extra dylibs and frameworks into IPA
         if: ${{ inputs.create_release }}
         run: |
           set -e
@@ -120,51 +120,54 @@ jobs:
           unzip -q App.ipa
           APP_DIR=$(ls -d Payload/*.app | head -n 1)
           echo "App bundle: $APP_DIR"
+          mkdir -p "$APP_DIR/Frameworks"
 
-          # Copy extra .dylib files into the app bundle
-          for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
-            name=$(basename "$dylib")
-            echo "Copying dylib: $name"
-            cp "$dylib" "$APP_DIR/$name"
-          done
+          DYLIB_DIR="${{ github.workspace }}/.dylib"
 
-          # Copy CydiaSubstrate.framework into Frameworks/
-          FRAMEWORK_SRC="${{ github.workspace }}/.dylib/CydiaSubstrate.framework"
-          if [ -d "$FRAMEWORK_SRC" ]; then
-            echo "Copying CydiaSubstrate.framework"
-            mkdir -p "$APP_DIR/Frameworks"
-            cp -r "$FRAMEWORK_SRC" "$APP_DIR/Frameworks/CydiaSubstrate.framework"
-          fi
-
-          # Read the main binary name using xmlstarlet (Linux compatible)
+          # Read the main binary name
           BINARY_NAME=$(xmlstarlet sel -t -v \
             "/plist/dict/key[text()='CFBundleExecutable']/following-sibling::*[1]/text()" \
             "$(pwd)/$APP_DIR/Info.plist")
           BINARY="$APP_DIR/$BINARY_NAME"
           echo "Main binary: $BINARY"
 
-          # Use insert_dylib to register each dylib as a load command
-          for dylib in ${{ github.workspace }}/.dylib/*.dylib; do
+          # Copy and inject all .dylib files
+          for dylib in "$DYLIB_DIR"/*.dylib; do
+            [ -f "$dylib" ] || continue
             name=$(basename "$dylib")
+            echo "Copying dylib: $name"
+            cp "$dylib" "$APP_DIR/$name"
             echo "Injecting load command for: $name"
             /tmp/insert_dylib --strip-codesig --inplace \
               "@executable_path/$name" "$BINARY"
           done
 
-          # Inject CydiaSubstrate.framework binary load command
-          echo "Injecting load command for CydiaSubstrate.framework"
-          /tmp/insert_dylib --strip-codesig --inplace \
-            "@executable_path/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" "$BINARY"
+          # Copy and inject all .framework bundles
+          for framework in "$DYLIB_DIR"/*.framework; do
+            [ -d "$framework" ] || continue
+            fname=$(basename "$framework" .framework)
+            framework_name=$(basename "$framework")
+            echo "Copying framework: $framework_name"
+            cp -r "$framework" "$APP_DIR/Frameworks/$framework_name"
+            bin_path="$APP_DIR/Frameworks/$framework_name/$fname"
+            if [ -f "$bin_path" ]; then
+              echo "Injecting load command for: $framework_name"
+              /tmp/insert_dylib --strip-codesig --inplace \
+                "@executable_path/Frameworks/$framework_name/$fname" "$BINARY"
+            else
+              echo "WARNING: No binary found at $bin_path, skipping inject."
+            fi
+          done
 
           # Repack IPA
           rm App.ipa
           zip -qr App_deluxe.ipa Payload/
           mkdir -p ${{ github.workspace }}/packages
-          DELUXE_IPA="${{ github.workspace }}/packages/$(basename $IPA_PATH .ipa)_deluxe.ipa"
+          DELUXE_IPA="${{ github.workspace }}/packages/$(basename "$IPA_PATH" .ipa)_deluxe.ipa"
           cp App_deluxe.ipa "$DELUXE_IPA"
           echo "Output IPA: $DELUXE_IPA"
 
-          # Remove the original IPA from packages (keep only the deluxe one)
+          # Remove the original IPA, keep only the deluxe one
           rm "$IPA_PATH"
 
       - name: Hash release files
