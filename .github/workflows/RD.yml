@@ -265,13 +265,15 @@ jobs:
           "$LDID_BIN" -S "$EXECUTABLE_PATH"
 
           echo "Repacking IPA..."
-          rm -f "$IPA_FILE"
+          IPA_FILE_ABS="$(realpath "$IPA_FILE")"
+          mkdir -p "$(dirname "$IPA_FILE_ABS")"
+          rm -f "$IPA_FILE_ABS"
           (
             cd "$WORK_DIR"
-            zip -qry "$IPA_FILE" Payload
+            zip -qry "$IPA_FILE_ABS" Payload
           )
 
-          echo "Patched IPA written back to: $IPA_FILE"
+          echo "Patched IPA written back to: $IPA_FILE_ABS"
 
       - name: Hash release files
         id: hash_files
