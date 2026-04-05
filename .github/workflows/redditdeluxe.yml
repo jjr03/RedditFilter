@@ -1,4 +1,4 @@
-name: RedditDeluxe
+name: redditdeluxe
 
 on:
   push:
