@@ -165,8 +165,8 @@ jobs:
             echo "Copying dylibs..."
             for dylib in "${EXTRA_DYLIBS[@]}"; do
               base="$(basename "$dylib")"
-              cp -f "$dylib" "$APP_PATH/$base"
-              echo "@executable_path/$base" >> "$INJECT_LIST_FILE"
+              cp -f "$dylib" "$APP_PATH/Frameworks/$base"
+              echo "@executable_path/Frameworks/$base" >> "$INJECT_LIST_FILE"
               echo "  + $base"
             done
           fi
@@ -250,7 +250,7 @@ jobs:
             if [ -f "$real_path" ]; then
               "$LDID_BIN" -S "$real_path"
             fi
-          done < <(grep '^@executable_path/.*\.dylib$' "$INJECT_LIST_FILE" || true)
+          done < <(grep '^@executable_path/Frameworks/.*\.dylib$' "$INJECT_LIST_FILE" || true)
 
           echo "Signing injected frameworks..."
           while IFS= read -r fw_path; do
@@ -259,7 +259,7 @@ jobs:
             if [ -f "$real_path" ]; then
               "$LDID_BIN" -S "$real_path"
             fi
-          done < <(grep '^@executable_path/Frameworks/.*$' "$INJECT_LIST_FILE" || true)
+          done < <(grep '^@executable_path/Frameworks/.*\.framework/.*$' "$INJECT_LIST_FILE" || true)
 
           echo "Signing main executable..."
           "$LDID_BIN" -S "$EXECUTABLE_PATH"
