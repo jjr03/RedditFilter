@@ -26,37 +26,27 @@ jobs:
         id: package_info
         run: |
           version=$(cat Makefile | grep "PACKAGE_VERSION =" | cut -d' ' -f3)
-          if [ -z $version ]; then
+          if [ -z "$version" ]; then
             version=$(cat control | grep "Version:" | cut -d' ' -f2)
           fi
-          echo "id=$(cat control | grep "Package:" | cut -d' ' -f2)" >> $GITHUB_OUTPUT
-          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "id=$(cat control | grep "Package:" | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync
+          sudo apt install -y rsync unzip zip python3 python3-pip file
 
       - name: Install theos-jailed dependencies
         if: ${{ inputs.create_release }}
         run: |
           sudo apt update
-          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin llvm xmlstarlet
+          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin llvm xmlstarlet curl
           curl -L https://github.com/libimobiledevice/libplist/releases/download/2.6.0/libplist-2.6.0.tar.bz2 | bzip2 -d | tar -x
           cd libplist*
           ./configure
           sudo make install
           sudo ldconfig
-
-      - name: Build insert_dylib (Linux fork)
-        if: ${{ inputs.create_release }}
-        run: |
-          git clone --depth=1 https://github.com/LeanVel/insert_dylib /tmp/insert_dylib_src
-          cd /tmp/insert_dylib_src
-          chmod +x Install.sh
-          sudo ./Install.sh
-          which insert_dylib
-          insert_dylib --help || true
 
       - name: Download IPA (Auto)
         if: ${{ inputs.create_release && !inputs.ipa_url }}
@@ -78,8 +68,8 @@ jobs:
         id: ipa_info
         run: |
           info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "bundle-id=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
-          echo "version=$(echo $info | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> $GITHUB_OUTPUT
+          echo "bundle-id=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> "$GITHUB_OUTPUT"
+          echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> "$GITHUB_OUTPUT"
 
       - name: Setup theos
         uses: level3tjg/theos-action@main
@@ -101,7 +91,18 @@ jobs:
         run: |
           ./theos-jailed/install
 
-      - name: Build IPA (with RedditFilter)
+      - name: Build rootless deb
+        run: make package
+        env:
+          FINALPACKAGE: ${{ inputs.create_release }}
+          THEOS_PACKAGE_SCHEME: rootless
+
+      - name: Build rootful deb
+        run: make clean package
+        env:
+          FINALPACKAGE: ${{ inputs.create_release }}
+
+      - name: Build IPA
         if: ${{ inputs.create_release }}
         run: make package
         env:
@@ -110,74 +111,170 @@ jobs:
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: Inject extra dylibs and frameworks into IPA
+      - name: Install LIEF for Mach-O patching
         if: ${{ inputs.create_release }}
         run: |
-          set -e
+          python3 -m pip install --upgrade pip
+          python3 -m pip install lief
 
-          # Find the built IPA
-          IPA_PATH=$(ls packages/*.ipa | head -n 1)
-          echo "Injecting into: $IPA_PATH"
+      - name: Inject extra .dylib and .framework from .dylib folder
+        if: ${{ inputs.create_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          # Unpack IPA
-          mkdir -p /tmp/ipa_work
-          cp "$IPA_PATH" /tmp/ipa_work/App.ipa
-          cd /tmp/ipa_work
-          unzip -q App.ipa
-          APP_DIR=$(ls -d Payload/*.app | head -n 1)
-          echo "App bundle: $APP_DIR"
-          mkdir -p "$APP_DIR/Frameworks"
+          IPA_FILE="$(ls -t packages/*.ipa | head -n1)"
+          if [ -z "${IPA_FILE:-}" ] || [ ! -f "$IPA_FILE" ]; then
+            echo "No IPA found in packages/"
+            exit 1
+          fi
 
-          DYLIB_DIR="${{ github.workspace }}/.dylib"
+          if [ ! -d ".dylib" ]; then
+            echo "No .dylib directory found, skipping extra injection"
+            exit 0
+          fi
 
-          # Read the main binary name
-          BINARY_NAME=$(xmlstarlet sel -t -v \
-            "/plist/dict/key[text()='CFBundleExecutable']/following-sibling::*[1]/text()" \
-            "$(pwd)/$APP_DIR/Info.plist")
-          BINARY="$APP_DIR/$BINARY_NAME"
-          echo "Main binary: $BINARY"
+          WORK_DIR="${{ github.workspace }}/patched_ipa"
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
 
-          # Copy and inject all .dylib files
-          for dylib in "$DYLIB_DIR"/*.dylib; do
-            [ -f "$dylib" ] || continue
-            name=$(basename "$dylib")
-            echo "Copying dylib: $name"
-            cp "$dylib" "$APP_DIR/$name"
-            echo "Injecting load command for: $name"
-            insert_dylib --strip-codesig --inplace \
-              "@executable_path/$name" "$BINARY"
-          done
+          unzip -q "$IPA_FILE" -d "$WORK_DIR"
 
-          # Copy and inject all .framework bundles
-          for framework in "$DYLIB_DIR"/*.framework; do
-            [ -d "$framework" ] || continue
-            fname=$(basename "$framework" .framework)
-            framework_name=$(basename "$framework")
-            echo "Copying framework: $framework_name"
-            cp -r "$framework" "$APP_DIR/Frameworks/$framework_name"
-            bin_path="$APP_DIR/Frameworks/$framework_name/$fname"
-            if [ -f "$bin_path" ]; then
-              echo "Injecting load command for: $framework_name"
-              insert_dylib --strip-codesig --inplace \
-                "@executable_path/Frameworks/$framework_name/$fname" "$BINARY"
-            else
-              echo "WARNING: No binary found at $bin_path, skipping inject."
+          APP_PATH="$(find "$WORK_DIR/Payload" -maxdepth 2 -type d -name "*.app" | head -n1)"
+          if [ -z "${APP_PATH:-}" ] || [ ! -d "$APP_PATH" ]; then
+            echo "Could not locate .app bundle"
+            exit 1
+          fi
+
+          EXECUTABLE_NAME="$(/usr/bin/python3 - <<'PY' "$APP_PATH/Info.plist"
+import plistlib, sys
+with open(sys.argv[1], 'rb') as f:
+    p = plistlib.load(f)
+print(p["CFBundleExecutable"])
+PY
+)"
+          EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE_NAME"
+
+          echo "Using IPA: $IPA_FILE"
+          echo "App path: $APP_PATH"
+          echo "Executable: $EXECUTABLE_PATH"
+
+          mkdir -p "$APP_PATH/Frameworks"
+
+          mapfile -t EXTRA_DYLIBS < <(find .dylib -maxdepth 1 -type f -name "*.dylib" | sort || true)
+          mapfile -t EXTRA_FRAMEWORKS < <(find .dylib -maxdepth 1 -type d -name "*.framework" | sort || true)
+
+          INJECT_LIST_FILE="$WORK_DIR/inject_paths.txt"
+          : > "$INJECT_LIST_FILE"
+
+          if [ "${#EXTRA_DYLIBS[@]}" -gt 0 ]; then
+            echo "Copying dylibs..."
+            for dylib in "${EXTRA_DYLIBS[@]}"; do
+              base="$(basename "$dylib")"
+              cp -f "$dylib" "$APP_PATH/$base"
+              echo "@executable_path/$base" >> "$INJECT_LIST_FILE"
+              echo "  + $base"
+            done
+          fi
+
+          if [ "${#EXTRA_FRAMEWORKS[@]}" -gt 0 ]; then
+            echo "Copying frameworks..."
+            for framework in "${EXTRA_FRAMEWORKS[@]}"; do
+              fw_name="$(basename "$framework")"
+              fw_base="${fw_name%.framework}"
+              dest="$APP_PATH/Frameworks/$fw_name"
+
+              rm -rf "$dest"
+              cp -a "$framework" "$dest"
+
+              if [ -f "$dest/$fw_base" ]; then
+                echo "@executable_path/Frameworks/$fw_name/$fw_base" >> "$INJECT_LIST_FILE"
+                echo "  + $fw_name"
+              else
+                echo "Framework binary not found for $fw_name"
+                exit 1
+              fi
+            done
+          fi
+
+          if [ ! -s "$INJECT_LIST_FILE" ]; then
+            echo "No extra dylib/framework found in .dylib/, skipping patch"
+            exit 0
+          fi
+
+          echo "Injecting load commands into main executable..."
+          python3 - <<'PY' "$EXECUTABLE_PATH" "$INJECT_LIST_FILE"
+import sys
+import lief
+
+exe_path = sys.argv[1]
+inject_list = sys.argv[2]
+
+binary = lief.parse(exe_path)
+if binary is None:
+    raise RuntimeError(f"Failed to parse Mach-O binary: {exe_path}")
+
+existing = set(binary.libraries)
+
+with open(inject_list, "r", encoding="utf-8") as f:
+    libs = [line.strip() for line in f if line.strip()]
+
+for lib in libs:
+    if lib in existing:
+        print(f"Already present: {lib}")
+        continue
+    print(f"Adding: {lib}")
+    binary.add_library(lib)
+
+binary.write(exe_path)
+PY
+
+          echo "Locating ldid..."
+          LDID_BIN=""
+          if command -v ldid >/dev/null 2>&1; then
+            LDID_BIN="$(command -v ldid)"
+          elif [ -x "${THEOS}/toolchain/linux/iphone/bin/ldid" ]; then
+            LDID_BIN="${THEOS}/toolchain/linux/iphone/bin/ldid"
+          elif [ -x "${THEOS}/bin/ldid" ]; then
+            LDID_BIN="${THEOS}/bin/ldid"
+          else
+            echo "ldid not found"
+            exit 1
+          fi
+
+          echo "Using ldid: $LDID_BIN"
+
+          echo "Signing injected dylibs..."
+          while IFS= read -r dylib_path; do
+            [ -n "$dylib_path" ] || continue
+            real_path="$APP_PATH/${dylib_path#@executable_path/}"
+            if [ -f "$real_path" ]; then
+              "$LDID_BIN" -S "$real_path"
             fi
-          done
+          done < <(grep '^@executable_path/.*\.dylib$' "$INJECT_LIST_FILE" || true)
 
-          # Repack IPA
-          rm App.ipa
-          zip -qr App_deluxe.ipa Payload/
-          mkdir -p ${{ github.workspace }}/packages
-          DELUXE_IPA="${{ github.workspace }}/packages/$(basename "$IPA_PATH" .ipa)_deluxe.ipa"
-          cp App_deluxe.ipa "$DELUXE_IPA"
-          echo "Output IPA: $DELUXE_IPA"
+          echo "Signing injected frameworks..."
+          while IFS= read -r fw_path; do
+            [ -n "$fw_path" ] || continue
+            real_path="$APP_PATH/${fw_path#@executable_path/}"
+            if [ -f "$real_path" ]; then
+              "$LDID_BIN" -S "$real_path"
+            fi
+          done < <(grep '^@executable_path/Frameworks/.*$' "$INJECT_LIST_FILE" || true)
 
-          # Remove the original IPA, keep only the deluxe one
-          rm "$IPA_PATH"
+          echo "Signing main executable..."
+          "$LDID_BIN" -S "$EXECUTABLE_PATH"
+
+          echo "Repacking IPA..."
+          rm -f "$IPA_FILE"
+          (
+            cd "$WORK_DIR"
+            zip -qry "$IPA_FILE" Payload
+          )
+
+          echo "Patched IPA written back to: $IPA_FILE"
 
       - name: Hash release files
-        if: ${{ inputs.create_release }}
         id: hash_files
         run: |
           echo 'hashes<<EOF' >> $GITHUB_OUTPUT
@@ -185,10 +282,9 @@ jobs:
           echo 'EOF' >> $GITHUB_OUTPUT
 
       - name: Upload artifacts
-        if: ${{ inputs.create_release }}
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}_deluxe
+          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}
           path: packages/*
 
       - name: Create release
@@ -197,5 +293,5 @@ jobs:
         with:
           draft: true
           files: packages/*
-          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}-deluxe
+          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
           body: ${{ steps.hash_files.outputs.hashes }}
