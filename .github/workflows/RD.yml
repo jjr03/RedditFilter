@@ -155,10 +155,7 @@ jobs:
             "CydiaSubstrate.framework"
           )
 
-          EXECUTABLE="$(
-            /usr/bin/python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleExecutable"])' \
-            "$APP_PATH/Info.plist"
-          )"
+          EXECUTABLE="$(/usr/bin/python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleExecutable"])' "$APP_PATH/Info.plist")"
           EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE"
 
           echo "Executable: $EXECUTABLE_PATH"
@@ -167,13 +164,7 @@ jobs:
           export DYLIBS="$(IFS=,; echo "${INJECT_DYLIBS[*]}")"
           export FRAMEWORKS="$(IFS=,; echo "${INJECT_FRAMEWORKS[*]}")"
 
-          python3 -c 'import os,lief; binary=lief.parse(os.environ["EXECUTABLE_PATH"]); exe=os.environ["EXECUTABLE_PATH"]; \
-if binary is None: raise RuntimeError("Failed to parse Mach-O: " + exe); \
-dylibs=[x for x in os.environ.get("DYLIBS","").split(",") if x]; \
-frameworks=[x for x in os.environ.get("FRAMEWORKS","").split(",") if x]; \
-[print("Inject dylib:", "@executable_path/Frameworks/" + lib) or binary.add_library("@executable_path/Frameworks/" + lib) for lib in dylibs]; \
-[print("Inject framework:", "@executable_path/Frameworks/" + fw + "/" + fw.replace(".framework","")) or binary.add_library("@executable_path/Frameworks/" + fw + "/" + fw.replace(".framework","")) for fw in frameworks]; \
-binary.write(exe)'
+          python3 .github/scripts/patch_macho.py
 
           if command -v ldid >/dev/null 2>&1; then
             LDID_BIN="$(command -v ldid)"
