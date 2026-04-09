@@ -8,10 +8,6 @@ on:
         description: "Build IPA and create draft release"
         default: false
         type: boolean
-      ipa_url:
-        description: "Direct URL to Decrypted IPA file"
-        type: string
-        required: false
 
 jobs:
   build:
@@ -22,85 +18,18 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Get package info
-        id: package_info
-        run: |
-          version=$(cat Makefile | grep "PACKAGE_VERSION =" | cut -d' ' -f3)
-          if [ -z "$version" ]; then
-            version=$(cat control | grep "Version:" | cut -d' ' -f2)
-          fi
-          echo "id=$(cat control | grep "Package:" | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync unzip zip
+          sudo apt install -y unzip zip python3 python3-pip
 
-      - name: Install theos-jailed dependencies
+      - name: Install LIEF
         if: ${{ inputs.create_release }}
         run: |
-          sudo apt update
-          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin llvm xmlstarlet curl
-          curl -L https://github.com/libimobiledevice/libplist/releases/download/2.6.0/libplist-2.6.0.tar.bz2 | bzip2 -d | tar -x
-          cd libplist*
-          ./configure
-          sudo make install
-          sudo ldconfig
+          python3 -m pip install lief
 
-      - name: Download IPA (Auto)
-        if: ${{ inputs.create_release && !inputs.ipa_url }}
-        uses: level3tjg/decryptedappstore-action@main
-        with:
-          appstore_url: "https://apps.apple.com/us/app/reddit/id1064216828"
-          cache: true
-          path: ${{ github.workspace }}/App.ipa
-          token: ${{ secrets.DECRYPTEDAPPSTORE_SESSION_TOKEN }}
-
-      - name: Download IPA (Manual)
-        if: ${{ inputs.create_release && inputs.ipa_url }}
-        run: |
-          curl -Lo "${{ github.workspace }}/App.ipa" "${{ inputs.ipa_url }}"
-          zip -T "${{ github.workspace }}/App.ipa"
-
-      - name: Get IPA Info
-        if: ${{ inputs.create_release }}
-        id: ipa_info
-        run: |
-          info=$(unzip -p "${{ github.workspace }}/App.ipa" Payload/*.app/Info.plist)
-          echo "bundle-id=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleIdentifier\"]/following-sibling::*[1]/text()")" >> "$GITHUB_OUTPUT"
-          echo "version=$(echo "$info" | xmlstarlet sel -t -v "/plist/dict/key[text()=\"CFBundleShortVersionString\"]/following-sibling::*[1]/text()")" >> "$GITHUB_OUTPUT"
-
-      - name: Setup theos
+      - name: Setup theos (per ldid)
         uses: level3tjg/theos-action@main
-        with:
-          cache: true
-          cache-dir-theos: ${{ github.workspace }}/theos
-          cache-dir-sdks: ${{ github.workspace }}/theos/sdks
-
-      - name: Checkout theos-jailed
-        if: ${{ inputs.create_release }}
-        uses: actions/checkout@v4
-        with:
-          repository: level3tjg/theos-jailed
-          path: theos-jailed
-          submodules: recursive
-
-      - name: Install theos-jailed
-        if: ${{ inputs.create_release }}
-        run: |
-          ./theos-jailed/install
-
-      - name: Build rootless deb
-        run: make package
-        env:
-          FINALPACKAGE: ${{ inputs.create_release }}
-          THEOS_PACKAGE_SCHEME: rootless
-
-      - name: Build rootful deb
-        run: make clean package
-        env:
-          FINALPACKAGE: ${{ inputs.create_release }}
 
       - name: Build IPA
         if: ${{ inputs.create_release }}
@@ -108,10 +37,8 @@ jobs:
         env:
           FINALPACKAGE: 1
           SIDELOADED: 1
-          IPA: ${{ github.workspace }}/App.ipa
-          APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: Copy extra .dylib and .framework into IPA
+      - name: Inject Substrate only
         if: ${{ inputs.create_release }}
         run: |
           set -euo pipefail
@@ -119,51 +46,108 @@ jobs:
           IPA_FILE="$(ls -t packages/*.ipa | head -n1)"
           echo "Using IPA: $IPA_FILE"
 
-          WORK_DIR="${{ github.workspace }}/patched_ipa"
+          WORK_DIR="patched_ipa"
           rm -rf "$WORK_DIR"
           mkdir -p "$WORK_DIR"
 
           unzip -q "$IPA_FILE" -d "$WORK_DIR"
 
-          APP_PATH="$(find "$WORK_DIR/Payload" -maxdepth 2 -type d -name "*.app" | head -n1)"
-          echo "App path: $APP_PATH"
-
+          APP_PATH="$(find "$WORK_DIR/Payload" -name "*.app" | head -n1)"
           mkdir -p "$APP_PATH/Frameworks"
 
-          echo "Copying dylibs..."
-          find .dylib -maxdepth 1 -type f -name "*.dylib" -exec cp -f {} "$APP_PATH/Frameworks/" \;
+          echo "Copying all payloads..."
+          find .dylib -name "*.dylib" -exec cp {} "$APP_PATH/Frameworks/" \;
+          find .dylib -name "*.framework" -exec cp -a {} "$APP_PATH/Frameworks/" \;
 
-          echo "Copying frameworks..."
-          find .dylib -maxdepth 1 -type d -name "*.framework" -exec cp -a {} "$APP_PATH/Frameworks/" \;
+          ########################################
+          # 🔥 SOLO SUBSTRATE
+          ########################################
 
-          echo "Repacking IPA..."
-          IPA_FILE_ABS="$(realpath "$IPA_FILE")"
-          rm -f "$IPA_FILE_ABS"
-          (
-            cd "$WORK_DIR"
-            zip -qry "$IPA_FILE_ABS" Payload
+          INJECT_DYLIBS=(
+            "libsubstrate.dylib"
           )
 
-          echo "Done: $IPA_FILE_ABS"
+          INJECT_FRAMEWORKS=(
+            "CydiaSubstrate.framework"
+          )
 
-      - name: Hash release files
-        id: hash_files
-        run: |
-          echo 'hashes<<EOF' >> $GITHUB_OUTPUT
-          echo "$(sha256sum packages/*)" >> $GITHUB_OUTPUT
-          echo 'EOF' >> $GITHUB_OUTPUT
+          ########################################
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}
-          path: packages/*
+          EXECUTABLE=$(/usr/bin/python3 -c 'import plistlib,sys;print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleExecutable"])' "$APP_PATH/Info.plist")
+          EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE"
 
-      - name: Create release
-        if: ${{ inputs.create_release }}
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          files: packages/*
-          tag_name: v${{ steps.ipa_info.outputs.version }}-${{ steps.package_info.outputs.version }}
-          body: ${{ steps.hash_files.outputs.hashes }}
+          echo "Executable: $EXECUTABLE_PATH"
+
+          ########################################
+          # INJECTION
+          ########################################
+
+          export EXECUTABLE_PATH
+
+          cat > patch.py <<'PY'
+import os, lief
+
+binary = lief.parse(os.environ["EXECUTABLE_PATH"])
+
+# dylibs
+for lib in os.environ.get("DYLIBS", "").split(","):
+    if lib:
+        path = f"@executable_path/Frameworks/{lib}"
+        print("Inject dylib:", path)
+        binary.add_library(path)
+
+# frameworks
+for fw in os.environ.get("FRAMEWORKS", "").split(","):
+    if fw:
+        name = fw.replace(".framework", "")
+        path = f"@executable_path/Frameworks/{fw}/{name}"
+        print("Inject framework:", path)
+        binary.add_library(path)
+
+binary.write(os.environ["EXECUTABLE_PATH"])
+PY
+
+          export DYLIBS=$(IFS=, ; echo "${INJECT_DYLIBS[*]}")
+          export FRAMEWORKS=$(IFS=, ; echo "${INJECT_FRAMEWORKS[*]}")
+
+          python3 patch.py
+
+          ########################################
+          # SIGNING
+          ########################################
+
+          if command -v ldid >/dev/null 2>&1; then
+            LDID=$(command -v ldid)
+          else
+            LDID="${THEOS}/toolchain/linux/iphone/bin/ldid"
+          fi
+
+          echo "Using ldid: $LDID"
+
+          echo "Signing dylibs..."
+          for lib in "${INJECT_DYLIBS[@]}"; do
+            "$LDID" -S "$APP_PATH/Frameworks/$lib"
+          done
+
+          echo "Signing frameworks..."
+          for fw in "${INJECT_FRAMEWORKS[@]}"; do
+            base="${fw%.framework}"
+            "$LDID" -S "$APP_PATH/Frameworks/$fw/$base"
+          done
+
+          echo "Signing main executable..."
+          "$LDID" -S "$EXECUTABLE_PATH"
+
+          ########################################
+          # REPACK
+          ########################################
+
+          IPA_ABS=$(realpath "$IPA_FILE")
+          rm -f "$IPA_ABS"
+
+          (
+            cd "$WORK_DIR"
+            zip -qry "$IPA_ABS" Payload
+          )
+
+          echo "Done!"
