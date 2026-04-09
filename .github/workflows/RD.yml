@@ -53,15 +53,16 @@ jobs:
           unzip -q "$IPA_FILE" -d "$WORK_DIR"
 
           APP_PATH="$(find "$WORK_DIR/Payload" -name "*.app" | head -n1)"
+          if [ -z "${APP_PATH:-}" ] || [ ! -d "$APP_PATH" ]; then
+            echo "App bundle not found"
+            exit 1
+          fi
+
           mkdir -p "$APP_PATH/Frameworks"
 
           echo "Copying all payloads..."
-          find .dylib -name "*.dylib" -exec cp {} "$APP_PATH/Frameworks/" \;
-          find .dylib -name "*.framework" -exec cp -a {} "$APP_PATH/Frameworks/" \;
-
-          ########################################
-          # 🔥 SOLO SUBSTRATE
-          ########################################
+          find .dylib -maxdepth 1 -type f -name "*.dylib" -exec cp -f {} "$APP_PATH/Frameworks/" \;
+          find .dylib -maxdepth 1 -type d -name "*.framework" -exec cp -a {} "$APP_PATH/Frameworks/" \;
 
           INJECT_DYLIBS=(
             "libsubstrate.dylib"
@@ -71,53 +72,34 @@ jobs:
             "CydiaSubstrate.framework"
           )
 
-          ########################################
-
           EXECUTABLE=$(/usr/bin/python3 -c 'import plistlib,sys;print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleExecutable"])' "$APP_PATH/Info.plist")
           EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE"
 
           echo "Executable: $EXECUTABLE_PATH"
 
-          ########################################
-          # INJECTION
-          ########################################
-
           export EXECUTABLE_PATH
+          export DYLIBS="$(IFS=,; echo "${INJECT_DYLIBS[*]}")"
+          export FRAMEWORKS="$(IFS=,; echo "${INJECT_FRAMEWORKS[*]}")"
 
-          cat > patch.py <<'PY'
-import os, lief
-
+          python3 -c 'import os, lief
 binary = lief.parse(os.environ["EXECUTABLE_PATH"])
-
-# dylibs
+if binary is None:
+    raise RuntimeError(f"Failed to parse Mach-O: {os.environ[\"EXECUTABLE_PATH\"]}")
 for lib in os.environ.get("DYLIBS", "").split(","):
     if lib:
         path = f"@executable_path/Frameworks/{lib}"
         print("Inject dylib:", path)
         binary.add_library(path)
-
-# frameworks
 for fw in os.environ.get("FRAMEWORKS", "").split(","):
     if fw:
         name = fw.replace(".framework", "")
         path = f"@executable_path/Frameworks/{fw}/{name}"
         print("Inject framework:", path)
         binary.add_library(path)
-
-binary.write(os.environ["EXECUTABLE_PATH"])
-PY
-
-          export DYLIBS=$(IFS=, ; echo "${INJECT_DYLIBS[*]}")
-          export FRAMEWORKS=$(IFS=, ; echo "${INJECT_FRAMEWORKS[*]}")
-
-          python3 patch.py
-
-          ########################################
-          # SIGNING
-          ########################################
+binary.write(os.environ["EXECUTABLE_PATH"])'
 
           if command -v ldid >/dev/null 2>&1; then
-            LDID=$(command -v ldid)
+            LDID="$(command -v ldid)"
           else
             LDID="${THEOS}/toolchain/linux/iphone/bin/ldid"
           fi
@@ -126,28 +108,28 @@ PY
 
           echo "Signing dylibs..."
           for lib in "${INJECT_DYLIBS[@]}"; do
-            "$LDID" -S "$APP_PATH/Frameworks/$lib"
+            if [ -f "$APP_PATH/Frameworks/$lib" ]; then
+              "$LDID" -S "$APP_PATH/Frameworks/$lib"
+            fi
           done
 
           echo "Signing frameworks..."
           for fw in "${INJECT_FRAMEWORKS[@]}"; do
             base="${fw%.framework}"
-            "$LDID" -S "$APP_PATH/Frameworks/$fw/$base"
+            if [ -f "$APP_PATH/Frameworks/$fw/$base" ]; then
+              "$LDID" -S "$APP_PATH/Frameworks/$fw/$base"
+            fi
           done
 
           echo "Signing main executable..."
           "$LDID" -S "$EXECUTABLE_PATH"
 
-          ########################################
-          # REPACK
-          ########################################
-
-          IPA_ABS=$(realpath "$IPA_FILE")
+          echo "Repacking..."
+          IPA_ABS="$(realpath "$IPA_FILE")"
           rm -f "$IPA_ABS"
-
           (
             cd "$WORK_DIR"
             zip -qry "$IPA_ABS" Payload
           )
 
-          echo "Done!"
+          echo "Done: $IPA_ABS"
