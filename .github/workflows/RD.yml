@@ -117,7 +117,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install lief
 
-      - name: Copy payloads and inject Substrate only
+      - name: Copy payloads and inject selected tweaks
         if: ${{ inputs.create_release }}
         shell: bash
         run: |
@@ -149,6 +149,7 @@ jobs:
 
           INJECT_DYLIBS=(
             "libsubstrate.dylib"
+            "redditColorComments.dylib"
           )
 
           INJECT_FRAMEWORKS=(
