@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync unzip zip python3 python3-pip file curl git
+          sudo apt install -y rsync unzip zip python3 python3-pip file curl git clang
 
       - name: Install theos-jailed dependencies
         if: ${{ inputs.create_release }}
@@ -96,10 +96,9 @@ jobs:
         run: |
           rm -rf insert_dylib_src
           git clone https://github.com/tyilo/insert_dylib.git insert_dylib_src
-          cd insert_dylib_src
-          gcc insert_dylib.c -o insert_dylib
-          sudo install -m 0755 insert_dylib /usr/local/bin/insert_dylib
-          insert_dylib --help >/dev/null || true
+          clang -o /usr/local/bin/insert_dylib insert_dylib_src/insert_dylib/main.c
+          chmod +x /usr/local/bin/insert_dylib
+          /usr/local/bin/insert_dylib --help >/dev/null || true
 
       - name: Build rootless deb
         run: make package
