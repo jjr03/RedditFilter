@@ -35,13 +35,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync unzip zip python3 python3-pip file
+          sudo apt install -y rsync unzip zip python3 python3-pip file curl git
 
       - name: Install theos-jailed dependencies
         if: ${{ inputs.create_release }}
         run: |
           sudo apt update
-          sudo apt install -y build-essential checkinstall git autoconf automake libtool-bin llvm xmlstarlet curl
+          sudo apt install -y build-essential checkinstall autoconf automake libtool-bin llvm xmlstarlet
           curl -L https://github.com/libimobiledevice/libplist/releases/download/2.6.0/libplist-2.6.0.tar.bz2 | bzip2 -d | tar -x
           cd libplist*
           ./configure
@@ -91,6 +91,16 @@ jobs:
         run: |
           ./theos-jailed/install
 
+      - name: Install insert_dylib
+        if: ${{ inputs.create_release }}
+        run: |
+          rm -rf insert_dylib_src
+          git clone https://github.com/tyilo/insert_dylib.git insert_dylib_src
+          cd insert_dylib_src
+          gcc insert_dylib.c -o insert_dylib
+          sudo install -m 0755 insert_dylib /usr/local/bin/insert_dylib
+          insert_dylib --help >/dev/null || true
+
       - name: Build rootless deb
         run: make package
         env:
@@ -110,12 +120,6 @@ jobs:
           SIDELOADED: 1
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
-
-      - name: Install LIEF
-        if: ${{ inputs.create_release }}
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install lief
 
       - name: Copy payloads and inject selected tweaks
         if: ${{ inputs.create_release }}
@@ -147,25 +151,21 @@ jobs:
           find .dylib -maxdepth 1 -type f -name "*.dylib" -exec cp -f {} "$APP_PATH/Frameworks/" \;
           find .dylib -maxdepth 1 -type d -name "*.framework" -exec cp -a {} "$APP_PATH/Frameworks/" \;
 
-          INJECT_DYLIBS=(
-            "libsubstrate.dylib"
-            "redditColorComments.dylib"
-          )
-
-          INJECT_FRAMEWORKS=(
-            "CydiaSubstrate.framework"
-          )
-
-          EXECUTABLE="$(/usr/bin/python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleExecutable"])' "$APP_PATH/Info.plist")"
+          EXECUTABLE="$(/usr/bin/python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["CFBundleExecutable"])' "$APP_PATH/Info.plist")"
           EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE"
 
           echo "Executable: $EXECUTABLE_PATH"
 
-          export EXECUTABLE_PATH
-          export DYLIBS="$(IFS=,; echo "${INJECT_DYLIBS[*]}")"
-          export FRAMEWORKS="$(IFS=,; echo "${INJECT_FRAMEWORKS[*]}")"
+          INJECT_DYLIBS=(
+            "redditColorComments.dylib"
+          )
 
-          python3 .github/scripts/patch_macho.py
+          echo "Injecting selected dylibs..."
+          for lib in "${INJECT_DYLIBS[@]}"; do
+            LIB_PATH="@executable_path/Frameworks/$lib"
+            echo "Inject: $LIB_PATH"
+            insert_dylib --all-yes "$LIB_PATH" "$EXECUTABLE_PATH" "$EXECUTABLE_PATH"
+          done
 
           if command -v ldid >/dev/null 2>&1; then
             LDID_BIN="$(command -v ldid)"
@@ -184,14 +184,6 @@ jobs:
           for lib in "${INJECT_DYLIBS[@]}"; do
             if [ -f "$APP_PATH/Frameworks/$lib" ]; then
               "$LDID_BIN" -S "$APP_PATH/Frameworks/$lib"
-            fi
-          done
-
-          echo "Signing injected frameworks..."
-          for fw in "${INJECT_FRAMEWORKS[@]}"; do
-            base="${fw%.framework}"
-            if [ -f "$APP_PATH/Frameworks/$fw/$base" ]; then
-              "$LDID_BIN" -S "$APP_PATH/Frameworks/$fw/$base"
             fi
           done
 
