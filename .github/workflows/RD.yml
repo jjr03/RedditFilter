@@ -147,8 +147,15 @@ jobs:
 
           mkdir -p "$APP_PATH/Frameworks"
 
-          echo "Copying all payloads..."
-          find .dylib -maxdepth 1 -type f -name "*.dylib" -exec cp -f {} "$APP_PATH/Frameworks/" \;
+          echo "Copying dylibs..."
+          find .dylib -maxdepth 1 -type f -name "*.dylib" ! -name "libsubstrate.dylib" -exec cp -f {} "$APP_PATH/Frameworks/" \;
+
+          if [ -f ".dylib/libsubstrate.dylib" ]; then
+            cp -f ".dylib/libsubstrate.dylib" "$APP_PATH/libsubstrate.dylib"
+            cp -f ".dylib/libsubstrate.dylib" "$APP_PATH/Frameworks/libsubstrate.dylib"
+          fi
+
+          echo "Copying frameworks..."
           find .dylib -maxdepth 1 -type d -name "*.framework" -exec cp -a {} "$APP_PATH/Frameworks/" \;
 
           EXECUTABLE="$(/usr/bin/python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1], "rb"))["CFBundleExecutable"])' "$APP_PATH/Info.plist")"
@@ -190,6 +197,16 @@ jobs:
               "$LDID_BIN" -S "$APP_PATH/Frameworks/$lib"
             fi
           done
+
+          if [ -f "$APP_PATH/libsubstrate.dylib" ]; then
+            echo "Signing root libsubstrate.dylib..."
+            "$LDID_BIN" -S "$APP_PATH/libsubstrate.dylib"
+          fi
+
+          if [ -f "$APP_PATH/Frameworks/libsubstrate.dylib" ]; then
+            echo "Signing Frameworks/libsubstrate.dylib..."
+            "$LDID_BIN" -S "$APP_PATH/Frameworks/libsubstrate.dylib"
+          fi
 
           echo "Signing CydiaSubstrate.framework binary if present..."
           if [ -f "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" ]; then
