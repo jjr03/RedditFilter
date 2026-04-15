@@ -121,7 +121,7 @@ jobs:
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: Copy payloads and inject selected tweaks
+      - name: Copy payloads and inject all tweak dylibs
         if: ${{ inputs.create_release }}
         shell: bash
         run: |
@@ -157,7 +157,11 @@ jobs:
           echo "Executable: $EXECUTABLE_PATH"
 
           INJECT_DYLIBS=(
+            "libsubstrate.dylib"
+            "zxPluginsInject.dylib"
             "redditColorComments.dylib"
+            "RedditUndoScrollUp.dylib"
+            "OledKeyboard.dylib"
           )
 
           echo "Injecting selected dylibs..."
@@ -186,6 +190,11 @@ jobs:
               "$LDID_BIN" -S "$APP_PATH/Frameworks/$lib"
             fi
           done
+
+          echo "Signing CydiaSubstrate.framework binary if present..."
+          if [ -f "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" ]; then
+            "$LDID_BIN" -S "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
+          fi
 
           echo "Signing main executable..."
           "$LDID_BIN" -S "$EXECUTABLE_PATH"
