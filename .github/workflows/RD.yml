@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y rsync unzip zip python3 python3-pip file curl git clang cargo rustc
+          sudo apt install -y rsync unzip zip python3 python3-pip file curl git
 
       - name: Install theos-jailed dependencies
         if: ${{ inputs.create_release }}
@@ -94,6 +94,8 @@ jobs:
       - name: Install insert-dylib
         if: ${{ inputs.create_release }}
         run: |
+          sudo apt update
+          sudo apt install -y clang cargo rustc
           rm -rf insert-dylib-src
           git clone https://github.com/hookforge/insert-dylib.git insert-dylib-src
           cd insert-dylib-src
@@ -195,7 +197,7 @@ jobs:
           done
 
           echo "Injection order:"
-          printf '-> %s\n' "${ORDERED_DYLIBS[@]}"
+          printf '%s\n' "${ORDERED_DYLIBS[@]}"
 
           echo "Injecting dylibs..."
           for lib in "${ORDERED_DYLIBS[@]}"; do
