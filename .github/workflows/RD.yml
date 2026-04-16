@@ -121,7 +121,7 @@ jobs:
           IPA: ${{ github.workspace }}/App.ipa
           APP_VERSION: ${{ steps.ipa_info.outputs.version }}
 
-      - name: Copy payloads and inject all tweak dylibs
+      - name: Copy payloads and inject dylibs automatically
         if: ${{ inputs.create_release }}
         shell: bash
         run: |
@@ -162,17 +162,43 @@ jobs:
           EXECUTABLE_PATH="$APP_PATH/$EXECUTABLE"
 
           echo "Executable: $EXECUTABLE_PATH"
+          echo "Detecting dylibs automatically..."
 
-          INJECT_DYLIBS=(
-            "libsubstrate.dylib"
-            "zxPluginsInject.dylib"
-            "redditColorComments.dylib"
-            "RedditUndoScrollUp.dylib"
-            "OledKeyboard.dylib"
-          )
+          mapfile -t ALL_DYLIBS < <(find .dylib -maxdepth 1 -type f -name "*.dylib" -printf "%f\n" | sort)
 
-          echo "Injecting selected dylibs..."
-          for lib in "${INJECT_DYLIBS[@]}"; do
+          if [ "${#ALL_DYLIBS[@]}" -eq 0 ]; then
+            echo "No dylibs found in .dylib/"
+            exit 1
+          fi
+
+          echo "Found dylibs:"
+          printf '%s\n' "${ALL_DYLIBS[@]}"
+
+          ORDERED_DYLIBS=()
+
+          for lib in "${ALL_DYLIBS[@]}"; do
+            if [[ "$lib" == "libsubstrate.dylib" ]]; then
+              ORDERED_DYLIBS+=("$lib")
+            fi
+          done
+
+          for lib in "${ALL_DYLIBS[@]}"; do
+            if [[ "$lib" == "zxPluginsInject.dylib" ]]; then
+              ORDERED_DYLIBS+=("$lib")
+            fi
+          done
+
+          for lib in "${ALL_DYLIBS[@]}"; do
+            if [[ "$lib" != "libsubstrate.dylib" && "$lib" != "zxPluginsInject.dylib" ]]; then
+              ORDERED_DYLIBS+=("$lib")
+            fi
+          done
+
+          echo "Injection order:"
+          printf '-> %s\n' "${ORDERED_DYLIBS[@]}"
+
+          echo "Injecting dylibs..."
+          for lib in "${ORDERED_DYLIBS[@]}"; do
             LIB_PATH="@executable_path/Frameworks/$lib"
             echo "Inject: $LIB_PATH"
             insert-dylib --all-yes --inplace "$LIB_PATH" "$EXECUTABLE_PATH"
@@ -191,8 +217,8 @@ jobs:
 
           echo "Using ldid: $LDID_BIN"
 
-          echo "Signing injected dylibs..."
-          for lib in "${INJECT_DYLIBS[@]}"; do
+          echo "Signing dylibs in Frameworks..."
+          for lib in "${ORDERED_DYLIBS[@]}"; do
             if [ -f "$APP_PATH/Frameworks/$lib" ]; then
               "$LDID_BIN" -S "$APP_PATH/Frameworks/$lib"
             fi
@@ -208,10 +234,14 @@ jobs:
             "$LDID_BIN" -S "$APP_PATH/Frameworks/libsubstrate.dylib"
           fi
 
-          echo "Signing CydiaSubstrate.framework binary if present..."
-          if [ -f "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" ]; then
-            "$LDID_BIN" -S "$APP_PATH/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
-          fi
+          echo "Signing framework binaries if present..."
+          find "$APP_PATH/Frameworks" -maxdepth 2 -type f | while read -r bin; do
+            case "$bin" in
+              *.framework/*)
+                "$LDID_BIN" -S "$bin" || true
+                ;;
+            esac
+          done
 
           echo "Signing main executable..."
           "$LDID_BIN" -S "$EXECUTABLE_PATH"
