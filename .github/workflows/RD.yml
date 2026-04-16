@@ -1,4 +1,4 @@
-name: RD
+name: RedditDeluxe
 
 on:
   push:
@@ -25,11 +25,11 @@ jobs:
       - name: Get package info
         id: package_info
         run: |
-          version=$(cat Makefile | grep "PACKAGE_VERSION =" | cut -d' ' -f3)
+          version=$(grep "PACKAGE_VERSION =" Makefile | cut -d' ' -f3 || true)
           if [ -z "$version" ]; then
-            version=$(cat control | grep "Version:" | cut -d' ' -f2)
+            version=$(grep "Version:" control | cut -d' ' -f2)
           fi
-          echo "id=$(cat control | grep "Package:" | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+          echo "id=$(grep "Package:" control | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
@@ -176,22 +176,53 @@ jobs:
           echo "Found dylibs:"
           printf '%s\n' "${ALL_DYLIBS[@]}"
 
+          SAFE_EXCLUDE_DYLIBS=(
+          )
+
+          PRIORITY_DYLIBS=(
+            "libsubstrate.dylib"
+            "zxPluginsInject.dylib"
+          )
+
+          FILTERED_DYLIBS=()
+          for lib in "${ALL_DYLIBS[@]}"; do
+            skip=0
+            for excluded in "${SAFE_EXCLUDE_DYLIBS[@]}"; do
+              if [ "$lib" = "$excluded" ]; then
+                skip=1
+                echo "Skipping excluded dylib: $lib"
+                break
+              fi
+            done
+            if [ "$skip" -eq 0 ]; then
+              FILTERED_DYLIBS+=("$lib")
+            fi
+          done
+
+          if [ "${#FILTERED_DYLIBS[@]}" -eq 0 ]; then
+            echo "All dylibs were excluded; nothing to inject"
+            exit 1
+          fi
+
           ORDERED_DYLIBS=()
 
-          for lib in "${ALL_DYLIBS[@]}"; do
-            if [[ "$lib" == "libsubstrate.dylib" ]]; then
-              ORDERED_DYLIBS+=("$lib")
-            fi
+          for priority in "${PRIORITY_DYLIBS[@]}"; do
+            for lib in "${FILTERED_DYLIBS[@]}"; do
+              if [ "$lib" = "$priority" ]; then
+                ORDERED_DYLIBS+=("$lib")
+              fi
+            done
           done
 
-          for lib in "${ALL_DYLIBS[@]}"; do
-            if [[ "$lib" == "zxPluginsInject.dylib" ]]; then
-              ORDERED_DYLIBS+=("$lib")
-            fi
-          done
-
-          for lib in "${ALL_DYLIBS[@]}"; do
-            if [[ "$lib" != "libsubstrate.dylib" && "$lib" != "zxPluginsInject.dylib" ]]; then
+          for lib in "${FILTERED_DYLIBS[@]}"; do
+            already_added=0
+            for added in "${ORDERED_DYLIBS[@]}"; do
+              if [ "$lib" = "$added" ]; then
+                already_added=1
+                break
+              fi
+            done
+            if [ "$already_added" -eq 0 ]; then
               ORDERED_DYLIBS+=("$lib")
             fi
           done
@@ -248,6 +279,13 @@ jobs:
           echo "Signing main executable..."
           "$LDID_BIN" -S "$EXECUTABLE_PATH"
 
+          echo "Verifying injected load commands..."
+          if command -v llvm-objdump >/dev/null 2>&1; then
+            llvm-objdump --macho --dylibs-used "$EXECUTABLE_PATH" || true
+          else
+            echo "llvm-objdump not available, skipping dylib listing"
+          fi
+
           echo "Repacking IPA..."
           IPA_FILE_ABS="$(realpath "$IPA_FILE")"
           rm -f "$IPA_FILE_ABS"
@@ -257,6 +295,29 @@ jobs:
           )
 
           echo "Patched IPA written back to: $IPA_FILE_ABS"
+
+      - name: Rename output IPA and ZIP files
+        if: ${{ inputs.create_release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          for file in packages/*.ipa packages/*.zip; do
+            [ -f "$file" ] || continue
+            dir="$(dirname "$file")"
+            base="$(basename "$file")"
+            new="$base"
+            new="${new//RedditFilter/RedditDeluxe}"
+            new="${new//redditfilter/redditdeluxe}"
+
+            if [ "$new" != "$base" ]; then
+              echo "Renaming $base -> $new"
+              mv -f "$file" "$dir/$new"
+            else
+              echo "No rename needed for $base"
+            fi
+          done
 
       - name: Hash release files
         id: hash_files
@@ -268,7 +329,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.package_info.outputs.id }}_${{ steps.package_info.outputs.version }}
+          name: RedditDeluxe_${{ steps.package_info.outputs.version }}
           path: packages/*
 
       - name: Create release
