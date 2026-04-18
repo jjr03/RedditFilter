@@ -78,7 +78,10 @@ Navigate to your personal copy of the repository.
 
 ### 4. Run the workflow
 
-- Select the workflow named **RD**
+- Go to the **Actions** tab
+- Select the workflow:
+  - **RD** → to build **Reddit Deluxe**
+  - **CI** → to build **Reddit Filter (base version)**
 - Click **Run workflow**
 
 ### 5. Provide a base IPA
@@ -158,4 +161,4 @@ Feel free to open an issue or submit a pull request.
 
 ## Repository
 
-[https://github.com/surrel14/RedditFilter](https://github.com/surrel14/RedditFilter)
+https://github.com/surrel14/RedditFilter
