@@ -80,8 +80,8 @@ Navigate to your personal copy of the repository.
 
 - Go to the **Actions** tab
 - Select the workflow:
-  - **RD** → to build **Reddit Deluxe**
-  - **CI** → to build **Reddit Filter (base version)**
+  - **Reddit Deluxe** → to build the full tweaked version
+  - **CI** → to build the base Reddit Filter version
 - Click **Run workflow**
 
 ### 5. Provide a base IPA
